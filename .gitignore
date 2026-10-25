@@ -2,3 +2,4 @@
 .superpowers/
 node_modules/
 *.node
+bindings/node/helpers/

@@ -1,0 +1,27 @@
+{
+  "name": "simdriver",
+  "version": "0.1.0",
+  "description": "Embed a live iOS simulator in your app: frames + touch input (Node, Bun, Electron main)",
+  "license": "MIT",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "*.node",
+    "helpers"
+  ],
+  "scripts": {
+    "build:debug": "napi build --platform --no-js && node scripts/copy-helpers.js",
+    "build": "napi build --platform --release --no-js && node scripts/copy-helpers.js",
+    "test": "bun test --timeout 30000",
+    "test:node": "node --import tsx test/node.test.mjs"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.10.0",
+    "tsx": "^4"
+  },
+  "napi": {
+    "name": "simdriver"
+  }
+}
