@@ -1,0 +1,8 @@
+<!doctype html><meta name=viewport content="width=device-width"><style>
+html,body{margin:0;height:100%;background:#000;touch-action:none}
+</style><script>
+const bg=c=>document.documentElement.style.background=document.body.style.background=c;
+addEventListener('touchstart',()=>bg('#fff'),{passive:true});
+addEventListener('touchend',()=>bg('#000'),{passive:true});
+addEventListener('touchcancel',()=>bg('#000'),{passive:true});
+</script>

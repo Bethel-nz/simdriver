@@ -27,7 +27,10 @@
  *
  * dtuhidd serves one client per service: a second connection invalidates the
  * first (the "dtuhidd connection … invalidated" error). simhid therefore owns
- * ALL HID — touches, buttons, keys, text — and reconnects if it is displaced.
+ * ALL HID — touches, buttons, keys, text — but does not fight for the service:
+ * when displaced it prints {"t":"displaced"} once, drops every command except a
+ * gesture start (touch/touch2 down, button, key, text), and on the next gesture
+ * start reconnects, prints {"t":"reclaimed"} and sends that command.
  *
  * stdin, one JSON object per line (device points):
  *   {"t":"touch","p":"down|move|up","x":..,"y":..,"e":0-4}
@@ -35,8 +38,10 @@
  *   {"t":"button","b":"HOME|LOCK|SIDE_BUTTON|SIRI|VOLUME_UP|VOLUME_DOWN","n":presses?,"d":holdSeconds?}
  *   {"t":"key","code":usage}           press + release
  *   {"t":"text","s":"..."}             US layout, ASCII
+ *   {"t":"_invalidate"}                TEST ONLY: cancel the connection and take the same
+ *                                      path as XPC_ERROR_CONNECTION_INVALID (displaced)
  * stdout, one JSON object per line:
- *   {"t":"ready","w":pt,"h":pt} · {"t":"warn","detail":..} · {"t":"error","detail":..} (then exit 1)
+ *   {"t":"ready","w":pt,"h":pt} · {"t":"displaced"} · {"t":"reclaimed"} · {"t":"warn","detail":..} · {"t":"error","detail":..} (then exit 1)
  *
  * Usage: simhid <udid>
  */
@@ -75,6 +80,9 @@ static SimDevice *g_device = nil;
 static double g_widthPt = 0, g_heightPt = 0;
 static xpc_connection_t g_conn = NULL;
 static volatile BOOL g_invalid = YES;
+// Set from the connection event handler (xpc queue) when another client took the
+// service over; cleared on the input queue when a gesture start reclaims it.
+static volatile BOOL g_displaced = NO;
 // Every send happens on this serial queue, so contact phases stay ordered and
 // button holds / key gaps can simply sleep it.
 static dispatch_queue_t g_inputQueue = nil;
@@ -152,6 +160,16 @@ static xpc_object_t keyboardPayload(uint64_t usage, uint64_t state) {
   return p;
 }
 
+/// Another client took the service over: step aside and report it once. Shared by the
+/// XPC_ERROR_CONNECTION_INVALID handler and the test-only `_invalidate` command.
+static void markDisplaced(void) {
+  g_invalid = YES;
+  if (!g_displaced) {
+    g_displaced = YES;
+    emit(@{ @"t" : @"displaced" });
+  }
+}
+
 static xpc_connection_t openConnection(NSString **why) {
   void *handle = dlopen(NULL, RTLD_NOW);
   endpoint_from_port_t endpointFromPort = (endpoint_from_port_t)dlsym(handle, "xpc_endpoint_create_mach_port_4sim");
@@ -178,8 +196,8 @@ static xpc_connection_t openConnection(NSString **why) {
   xpc_connection_set_target_queue(conn, g_xpcQueue);
   xpc_connection_set_event_handler(conn, ^(xpc_object_t event) {
     if (event == XPC_ERROR_CONNECTION_INVALID) {
-      // Usually another client (an idb_companion) took the service over.
-      if (conn == g_conn) g_invalid = YES;
+      // Another client took the service over: step aside, report it once.
+      if (conn == g_conn) markDisplaced();
     } else if (event == XPC_ERROR_CONNECTION_INTERRUPTED) {
       warn(@"dtuhidd connection interrupted (XPC reconnects on the next send)");
     }
@@ -211,8 +229,9 @@ static BOOL connectDigitizer(void) {
     xpc_connection_t conn = openConnection(&why);
     if (conn != NULL) {
       if (confirmLiveness(conn)) {
-        if (g_conn) xpc_connection_cancel(g_conn);
-        g_conn = conn;
+        xpc_connection_t old = g_conn;
+        g_conn = conn; // swap first so the old connection's INVALID is not mistaken for displacement
+        if (old) xpc_connection_cancel(old);
         g_invalid = NO;
         g_touchActive = g_touch2Active = NO; // contacts did not survive the old connection
         return YES;
@@ -227,6 +246,7 @@ static BOOL connectDigitizer(void) {
 }
 
 static void send(xpc_object_t msg) {
+  if (g_displaced) return; // displaced mid-command: step aside until the next gesture start
   if (g_invalid) {
     warn(@"dtuhidd connection was taken over or lost — reconnecting");
     if (!connectDigitizer()) return;
@@ -353,8 +373,25 @@ static double num(NSDictionary *cmd, NSString *key) {
   return [v isKindOfClass:NSNumber.class] ? [v doubleValue] : 0;
 }
 
+static BOOL startsGesture(NSDictionary *cmd) {
+  NSString *t = cmd[@"t"];
+  if ([t isEqualToString:@"touch"] || [t isEqualToString:@"touch2"]) return [cmd[@"p"] isEqualToString:@"down"];
+  return [t isEqualToString:@"button"] || [t isEqualToString:@"key"] || [t isEqualToString:@"text"];
+}
+
 static void handle(NSDictionary *cmd) {
   NSString *t = cmd[@"t"];
+  if ([t isEqualToString:@"_invalidate"]) { // test-only: simulate being displaced
+    if (g_conn) xpc_connection_cancel(g_conn);
+    markDisplaced();
+    return;
+  }
+  if (g_displaced) {
+    if (!startsGesture(cmd)) return;
+    if (!connectDigitizer()) return; // still displaced; connectDigitizer warned
+    g_displaced = NO;
+    emit(@{ @"t" : @"reclaimed" });
+  }
   if ([t isEqualToString:@"touch"]) {
     sendTouch(cmd[@"p"], num(cmd, @"x"), num(cmd, @"y"), (uint64_t)num(cmd, @"e"));
   } else if ([t isEqualToString:@"touch2"]) {
