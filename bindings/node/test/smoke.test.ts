@@ -44,6 +44,19 @@ describe('simdriver', () => {
     }
   });
 
+  test('Driver.start({}) accepts missing options (no null reaches napi)', () => {
+    // A bogus helperDir makes start fail after the options convert, without a simulator:
+    // with a device it is "helper missing", without one "no device" — never a
+    // "Failed to convert JavaScript value `Null`" from an unset udid.
+    let message = '';
+    try {
+      Driver.start({ helperDir: '/nonexistent/simdriver-helpers' }, () => {}).stop();
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message.includes('Failed to convert')).toBe(false);
+  });
+
   test('Driver.start streams frames and stop() delivers nothing after', async () => {
     if (!IT) return; // gated: needs a booted simulator
 

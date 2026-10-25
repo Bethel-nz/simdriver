@@ -36,10 +36,11 @@ class Driver {
     const o = opts ?? {};
     const n = native.Driver.start(
       {
-        udid: o.udid ?? null,
+        // undefined, not null: napi maps a missing field to None but rejects null.
+        udid: o.udid ?? undefined,
         fps: o.fps ?? 60,
         scale: o.scale ?? 2,
-        helperDir: o.helperDir ?? defaultHelperDir ?? null,
+        helperDir: o.helperDir ?? defaultHelperDir,
       },
       // The pump: drains parked events (latest frame wins) and re-arms; see src/lib.rs.
       () => {
