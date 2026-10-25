@@ -308,8 +308,8 @@ pub unsafe extern "C" fn sd_stop(d: *mut sd_driver) {
     }
 }
 
-/// The last error on this thread: valid until the next `sd_` call on this thread.
-/// Empty when the last call succeeded. Never NULL.
+/// The last error on this thread, from the most recent `sd_` call that failed.
+/// Valid until the next `sd_` call on this thread. Empty on a fresh thread. Never NULL.
 #[unsafe(no_mangle)]
 pub extern "C" fn sd_last_error() -> *const c_char {
     LAST_ERROR.with(|slot| {
