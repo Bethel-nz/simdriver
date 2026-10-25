@@ -4,3 +4,17 @@ use std::path::Path;
 pub fn baked_helper_dir() -> &'static Path {
     Path::new(env!("SIMDRIVER_BAKED_HELPER_DIR"))
 }
+
+mod error;
+mod protocol;
+mod shm;
+
+pub use error::Error;
+pub use protocol::Phase;
+pub use shm::Frame;
+
+#[doc(hidden)]
+pub mod __internal {
+    pub use crate::protocol::*;
+    pub use crate::shm::*;
+}
