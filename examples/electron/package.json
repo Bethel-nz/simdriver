@@ -1,0 +1,17 @@
+{
+  "name": "simdriver-electron-example",
+  "private": true,
+  "description": "A live iOS simulator inside an Electron window, via the simdriver Node addon",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "selftest": "node selftest.js"
+  },
+  "dependencies": {
+    "simdriver": "file:../../bindings/node"
+  },
+  "devDependencies": {
+    "electron": "37.2.0"
+  },
+  "trustedDependencies": ["electron"]
+}
