@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 /// Gesture router tick (lifts an idle trackpad pan).
 const TICK: Duration = Duration::from_millis(50);
-/// How long `start` waits for the first frame (or an early helper failure) before
+/// How long `start` waits for frames and input (or an early helper failure) before
 /// returning anyway, still `Starting`.
 const START_WAIT: Duration = Duration::from_secs(15);
 const BACKOFF_MIN: Duration = Duration::from_millis(100);
@@ -434,8 +434,15 @@ impl Inner {
     }
 }
 
+/// sdframe exits that mean "this device or Xcode won't work" (not found, no surface).
 fn is_fatal(code: Option<i32>) -> bool {
     matches!(code, Some(3 | 4))
+}
+
+/// The same for sdhid, plus 1: dtuhidd never came up, which is how an unknown Xcode
+/// build shows up on the input side.
+fn is_fatal_hid(code: Option<i32>) -> bool {
+    matches!(code, Some(1 | 3 | 4))
 }
 
 fn exit_text(name: &str, code: Option<i32>, why: &Option<String>) -> String {
@@ -513,7 +520,6 @@ impl Supervisor {
             Msg::FrameUp => {
                 self.framed = true;
                 self.frame_backoff = BACKOFF_MIN;
-                self.inner.startup_ok();
                 self.update();
             }
             Msg::FrameExit { generation, code, last } => {
@@ -561,7 +567,7 @@ impl Supervisor {
                     }
                     let why = self.last_hid_error.take().or(last_stderr);
                     let text = exit_text("sdhid", code, &why);
-                    if is_fatal(code) && self.inner.startup_fail(Error::Spawn(why.unwrap_or_else(|| text.clone()))) {
+                    if is_fatal_hid(code) && self.inner.startup_fail(Error::Spawn(why.unwrap_or_else(|| text.clone()))) {
                         return;
                     }
                     shared.note(text);
@@ -578,6 +584,7 @@ impl Supervisor {
     fn update(&mut self) {
         let s = if self.framed && self.hid_ready {
             self.restarting = false;
+            self.inner.startup_ok(); // `start` returns once frames and input are both up
             if self.displaced { State::InputDisplaced } else { State::Live }
         } else if self.restarting {
             State::Restarting
@@ -602,10 +609,11 @@ pub struct Driver {
 impl Driver {
     /// Start on a **booted** device (`Error::NotBooted` otherwise; booting is the host's
     /// call, see [`crate::boot`]). A live driver for the same device in this process is
-    /// stopped first. Returns once the first frame arrived (or after a bounded wait,
-    /// still `Starting`); fails with `Error::Spawn` if a helper cannot find the device
-    /// or its screen (exit 3/4) before that. Events go to `on_event` from internal
-    /// threads, possibly concurrently.
+    /// stopped first. Returns once frames stream and input is connected (`Live`), or
+    /// after a bounded wait, still `Starting`. Fails with `Error::Spawn` if, before that,
+    /// a helper cannot find the device or its screen (exit 3/4) or sdhid cannot reach the
+    /// digitizer (exit 1, e.g. an unsupported Xcode). Events go to `on_event` from
+    /// internal threads, possibly concurrently.
     pub fn start(opts: Options, on_event: impl Fn(Event) + Send + Sync + 'static) -> Result<Driver, Error> {
         let device = opts.device.resolve(&list_devices()?)?;
         if device.state != "Booted" {
@@ -887,8 +895,12 @@ mod tests {
         }
 
         fn start(&self, udid: &str, log: &Log) -> Result<Driver, Error> {
+            self.start_within(udid, log, W)
+        }
+
+        fn start_within(&self, udid: &str, log: &Log, wait: Duration) -> Result<Driver, Error> {
             let l = log.clone();
-            Driver::start_with(udid.into(), self.frame.clone(), self.hid.clone(), Box::new(move |e| l.push(e)), W)
+            Driver::start_with(udid.into(), self.frame.clone(), self.hid.clone(), Box::new(move |e| l.push(e)), wait)
         }
 
         fn hid_log(&self) -> Vec<String> {
@@ -944,7 +956,8 @@ mod tests {
     fn input_before_ready_is_replayed_in_device_points() {
         let rig = Rig::new("early", false);
         let log = Log::default();
-        let d = rig.start("fake-early", &log).unwrap();
+        // sdhid never gets ready here, so `start` returns after its bounded wait.
+        let d = rig.start_within("fake-early", &log, Duration::from_millis(300)).unwrap();
         assert_eq!(d.state(), State::Starting, "sdhid is not ready yet");
         d.pointer(Phase::Down, 0.5, 0.25, Modifiers::default());
         d.pointer(Phase::Move, 0.6, 0.25, Modifiers::default());
@@ -1051,6 +1064,18 @@ mod tests {
         );
         assert!(matches!(&r, Err(Error::Spawn(m)) if m == "no main screen"), "{:?}", r.err());
         assert_eq!(log.states(), vec![State::Starting, State::Stopped]);
+        drop(rig);
+
+        // Frames already streaming do not settle `start`: sdhid's exit 1 (dtuhidd never
+        // came up — an unsupported Xcode) still fails it.
+        let rig = Rig::new("hidfail1", false);
+        let log = Log::default();
+        let hid = (fake_helper(), vec!["fail".into(), "1".into(), "dtuhidd did not come up".into()]);
+        let l = log.clone();
+        let r = Driver::start_with("fake-hidfail1".into(), rig.frame.clone(), hid, Box::new(move |e| l.push(e)), W);
+        assert!(matches!(&r, Err(Error::Spawn(m)) if m == "dtuhidd did not come up"), "{:?}", r.err());
+        assert_eq!(log.states(), vec![State::Starting, State::Stopped]);
+        assert!(log.frames() > 0, "frames were streaming when sdhid failed");
         drop(rig);
 
         // Any other early exit is a restart, not a failure.
