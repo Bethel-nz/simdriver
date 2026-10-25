@@ -8,7 +8,7 @@
     "selftest": "node selftest.js"
   },
   "dependencies": {
-    "simdriver": "file:../../bindings/node"
+    "simdriver": "workspace:*"
   },
   "devDependencies": {
     "electron": "37.2.0"

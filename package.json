@@ -1,0 +1,5 @@
+{
+  "name": "simdriver-workspace",
+  "private": true,
+  "workspaces": ["bindings/node", "examples/*"]
+}
