@@ -116,9 +116,26 @@ const screen = new BgraCanvas(canvas);
 const state = document.getElementById('state');
 const sd = window.simdriver;
 
+// Fit the canvas inside the box at the frame's aspect (CSS size only; the backing size
+// is the frame's). Re-fit when the window resizes or the frame size changes.
+const box = document.getElementById('box');
+let aspect = 0;
+function fit() {
+  if (!aspect) return;
+  const { width: bw, height: bh } = box.getBoundingClientRect();
+  const w = Math.min(bw, bh * aspect);
+  canvas.style.width = `${Math.floor(w)}px`;
+  canvas.style.height = `${Math.floor(w / aspect)}px`;
+}
+new ResizeObserver(fit).observe(box);
+
 let selftestPending = true;
 sd.onFrame((frame) => {
   screen.draw(frame);
+  if (frame.width / frame.height !== aspect) {
+    aspect = frame.width / frame.height;
+    fit();
+  }
   if (selftestPending) {
     selftestPending = false;
     // Report where the canvas is once this frame is on screen (selftest only listens).
