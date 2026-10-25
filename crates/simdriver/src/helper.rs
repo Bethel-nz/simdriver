@@ -6,8 +6,8 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
-use std::thread;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, mpsc};
+use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
 /// Env var that overrides where the helper binaries live.
@@ -25,6 +25,78 @@ fn resolve_helper_dir(opt: Option<&Path>, env: Option<OsString>) -> PathBuf {
     match env {
         Some(e) if !e.is_empty() => PathBuf::from(e),
         _ => crate::baked_helper_dir().to_path_buf(),
+    }
+}
+
+/// Lock, ignoring poison: our critical sections never leave state half-updated, and the
+/// stop/drop paths must not panic.
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Env var: when set (non-empty), helper stderr is also copied to this process's stderr.
+pub const DEBUG_ENV: &str = "SIMDRIVER_DEBUG";
+
+/// Lets an owner promise "once `close` returns, no callback is running or will start".
+///
+/// Callbacks run inside [`CallbackGate::run`]; `close` marks the gate closed (later `run`s
+/// do nothing) and waits for running callbacks to finish, except ones on the closing thread
+/// itself (a callback that stops its owner must not wait for itself).
+pub(crate) struct CallbackGate {
+    st: Mutex<GateState>,
+    cv: Condvar,
+}
+
+#[derive(Default)]
+struct GateState {
+    closed: bool,
+    active: Vec<ThreadId>,
+}
+
+struct GateGuard<'a> {
+    gate: &'a CallbackGate,
+    me: ThreadId,
+}
+
+impl Drop for GateGuard<'_> {
+    fn drop(&mut self) {
+        let mut st = lock(&self.gate.st);
+        if let Some(i) = st.active.iter().position(|t| *t == self.me) {
+            st.active.swap_remove(i);
+        }
+        self.gate.cv.notify_all();
+    }
+}
+
+impl CallbackGate {
+    pub(crate) fn new() -> CallbackGate {
+        CallbackGate { st: Mutex::new(GateState::default()), cv: Condvar::new() }
+    }
+
+    /// Run `f` unless the gate is closed. Returns whether it ran.
+    pub(crate) fn run(&self, f: impl FnOnce()) -> bool {
+        let me = thread::current().id();
+        let guard = {
+            let mut st = lock(&self.st);
+            if st.closed {
+                return false;
+            }
+            st.active.push(me);
+            GateGuard { gate: self, me }
+        };
+        f();
+        drop(guard);
+        true
+    }
+
+    /// Close and wait for callbacks running on other threads. Idempotent.
+    pub(crate) fn close(&self) {
+        let me = thread::current().id();
+        let mut st = lock(&self.st);
+        st.closed = true;
+        while st.active.iter().any(|t| *t != me) {
+            st = self.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
+        }
     }
 }
 
@@ -53,12 +125,13 @@ impl Proc {
 ///
 /// Threads: one reads stdout and calls `on_line` per line; at stdout EOF it waits for the
 /// process to be reaped (and for stderr to drain, bounded) and calls `on_exit` exactly once.
-/// Another drains stderr, forwarding it to our stderr and keeping the last line.
+/// Another drains stderr: each line goes to `on_stderr` (if given) and is kept as
+/// `last_stderr`; it is copied to this process's stderr only when `$SIMDRIVER_DEBUG` is set
+/// (logging is the host's business). Nothing here panics on a failed write.
 /// stdin stays open (piped) for the helper's lifetime: both helpers exit on stdin EOF,
 /// which is what stops them if this process dies without running `stop`.
 pub struct Supervised {
     pid: u32,
-    name: String,
     proc_: Arc<Mutex<Proc>>,
     stdin: Mutex<Option<ChildStdin>>,
     last_stderr: Arc<Mutex<Option<String>>>,
@@ -68,12 +141,24 @@ pub struct Supervised {
 impl Supervised {
     /// Spawn `bin args…` with piped stdio. `on_line` gets each stdout line (no newline);
     /// `on_exit` gets the exit code (`None` if killed by a signal) once the process is gone,
-    /// including after `stop`.
+    /// including after `stop`. Stderr is only kept (see [`Supervised::last_stderr`]).
     pub fn spawn(
         bin: PathBuf,
         args: Vec<String>,
         on_line: impl Fn(String) + Send + 'static,
         on_exit: impl Fn(Option<i32>) + Send + 'static,
+    ) -> Result<Supervised, Error> {
+        Supervised::spawn_with_stderr(bin, args, on_line, |_| {}, move |code, _| on_exit(code))
+    }
+
+    /// Like [`Supervised::spawn`], plus every non-empty stderr line goes to `on_stderr`, and
+    /// `on_exit` also gets the last stderr line (stderr is drained, bounded at 500 ms, first).
+    pub fn spawn_with_stderr(
+        bin: PathBuf,
+        args: Vec<String>,
+        on_line: impl Fn(String) + Send + 'static,
+        on_stderr: impl Fn(String) + Send + 'static,
+        on_exit: impl Fn(Option<i32>, Option<String>) + Send + 'static,
     ) -> Result<Supervised, Error> {
         if !bin.is_file() {
             return Err(Error::HelperMissing(bin));
@@ -100,6 +185,7 @@ impl Supervised {
 
         let (err_done_tx, err_done_rx) = mpsc::channel::<()>();
         let keep = last_stderr.clone();
+        let debug = std::env::var_os(DEBUG_ENV).is_some_and(|v| !v.is_empty());
         thread::Builder::new()
             .name(format!("{name}-stderr"))
             .spawn(move || {
@@ -115,15 +201,20 @@ impl Supervised {
                     if line.is_empty() {
                         continue;
                     }
-                    // Helpers prefix their own lines ("[sdframe] …"); forward as-is.
-                    eprintln!("{line}");
-                    *keep.lock().unwrap() = Some(line);
+                    if debug {
+                        // Helpers prefix their own lines ("[sdframe] …"). Never panic on a
+                        // closed/broken host stderr.
+                        let _ = writeln!(std::io::stderr().lock(), "{line}");
+                    }
+                    *lock(&keep) = Some(line.clone());
+                    on_stderr(line);
                 }
                 drop(err_done_tx);
             })
             .map_err(|e| Error::Spawn(format!("stderr thread: {e}")))?;
 
         let reap = proc_.clone();
+        let keep = last_stderr.clone();
         thread::Builder::new()
             .name(format!("{name}-stdout"))
             .spawn(move || {
@@ -141,7 +232,7 @@ impl Supervised {
                 // stdout closed: the helper is exiting. Reap it (stop() may beat us to it).
                 let mut nap = Duration::from_millis(1);
                 let status = loop {
-                    if let Some(st) = reap.lock().unwrap().poll() {
+                    if let Some(st) = lock(&reap).poll() {
                         break st;
                     }
                     thread::sleep(nap);
@@ -149,11 +240,12 @@ impl Supervised {
                 };
                 // Let the last stderr line land so the owner can read it from on_exit.
                 let _ = err_done_rx.recv_timeout(Duration::from_millis(500));
-                on_exit(status.code());
+                let last = lock(&keep).clone();
+                on_exit(status.code(), last);
             })
             .map_err(|e| Error::Spawn(format!("stdout thread: {e}")))?;
 
-        Ok(Supervised { pid, name, proc_, stdin: Mutex::new(Some(stdin)), last_stderr, stopped: AtomicBool::new(false) })
+        Ok(Supervised { pid, proc_, stdin: Mutex::new(Some(stdin)), last_stderr, stopped: AtomicBool::new(false) })
     }
 
     pub fn pid(&self) -> u32 {
@@ -163,7 +255,7 @@ impl Supervised {
     /// Write one line (newline appended). Silently a no-op once stdin is closed or the
     /// helper is gone.
     pub fn send_line(&self, line: &str) {
-        let mut guard = self.stdin.lock().unwrap();
+        let mut guard = lock(&self.stdin);
         if let Some(w) = guard.as_mut() {
             let mut buf = Vec::with_capacity(line.len() + 1);
             buf.extend_from_slice(line.as_bytes());
@@ -174,12 +266,12 @@ impl Supervised {
 
     /// Close our end of the helper's stdin (the helper then exits on EOF).
     pub fn close_stdin(&self) {
-        drop(self.stdin.lock().unwrap().take());
+        drop(lock(&self.stdin).take());
     }
 
     /// The helper's most recent non-empty stderr line.
     pub fn last_stderr(&self) -> Option<String> {
-        self.last_stderr.lock().unwrap().clone()
+        lock(&self.last_stderr).clone()
     }
 
     /// Close stdin, SIGINT, SIGKILL after 250 ms; returns once the process is reaped.
@@ -190,7 +282,7 @@ impl Supervised {
         }
         self.close_stdin();
         {
-            let mut p = self.proc_.lock().unwrap();
+            let mut p = lock(&self.proc_);
             if p.poll().is_some() {
                 return;
             }
@@ -200,14 +292,13 @@ impl Supervised {
         }
         let deadline = Instant::now() + KILL_AFTER;
         while Instant::now() < deadline {
-            if self.proc_.lock().unwrap().poll().is_some() {
+            if lock(&self.proc_).poll().is_some() {
                 return;
             }
             thread::sleep(Duration::from_millis(2));
         }
-        let mut p = self.proc_.lock().unwrap();
+        let mut p = lock(&self.proc_);
         if p.poll().is_none() {
-            eprintln!("[{}] did not exit within {KILL_AFTER:?} of SIGINT; killing", self.name);
             let _ = p.child.kill();
             if let Ok(st) = p.child.wait() {
                 p.status = Some(st);
@@ -225,8 +316,9 @@ impl Drop for Supervised {
 /// The `fake_helper` example binary (tests/support/fake_helper.rs).
 ///
 /// `cargo test` builds examples next to the test binaries (`target/<profile>/examples`).
-/// When only the lib tests were built (e.g. `cargo test --lib`), it is built once into a
-/// separate target dir so this never contends for the outer cargo's build lock.
+/// When that one is missing or older than its source (e.g. after `cargo test --lib`), it is
+/// built once per test run into a separate target dir, so this never contends for the outer
+/// cargo's build lock.
 #[cfg(test)]
 pub(crate) fn fake_helper() -> PathBuf {
     use std::sync::OnceLock;
@@ -235,7 +327,13 @@ pub(crate) fn fake_helper() -> PathBuf {
         let exe = std::env::current_exe().expect("current_exe");
         let profile_dir = exe.parent().and_then(Path::parent).expect("target/<profile>/deps/<test>");
         let bin = profile_dir.join("examples").join("fake_helper");
-        if bin.exists() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_helper.rs");
+        let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        // Fresh if built after the last edit of its source (`cargo test --lib` does not
+        // rebuild examples, so an older one may be stale).
+        if let (Some(b), Some(s)) = (mtime(&bin), mtime(&src))
+            && b >= s
+        {
             return bin;
         }
         let target = profile_dir.parent().expect("target dir").join("fake-helper");
@@ -367,6 +465,50 @@ mod tests {
         assert!(pid_gone(pid), "fake survived drop");
         assert!(t0.elapsed() < Duration::from_millis(250), "drop took {:?}", t0.elapsed());
         assert!(exit.recv_timeout(W).is_ok(), "on_exit still fires after drop");
+    }
+
+    #[test]
+    fn stderr_goes_to_owner_and_exit() {
+        let (stx, srx) = mpsc::channel();
+        let (etx, erx) = mpsc::channel();
+        let _s = Supervised::spawn_with_stderr(
+            fake_helper(),
+            args(&["nope"]),
+            |_| {},
+            move |l| {
+                let _ = stx.send(l);
+            },
+            move |c, last| {
+                let _ = etx.send((c, last));
+            },
+        )
+        .unwrap();
+        let want = r#"fake_helper: unknown mode Some("nope")"#.to_string();
+        assert_eq!(srx.recv_timeout(W).unwrap(), want);
+        assert_eq!(erx.recv_timeout(W).unwrap(), (Some(2), Some(want)));
+    }
+
+    #[test]
+    fn gate_close_waits_for_running_callback_then_blocks_new_ones() {
+        let gate = Arc::new(CallbackGate::new());
+        let (in_tx, in_rx) = mpsc::channel();
+        let done = Arc::new(AtomicBool::new(false));
+        let (g, d) = (gate.clone(), done.clone());
+        let t = thread::spawn(move || {
+            g.run(|| {
+                in_tx.send(()).unwrap();
+                thread::sleep(Duration::from_millis(200));
+                d.store(true, Ordering::SeqCst);
+            })
+        });
+        in_rx.recv_timeout(W).unwrap();
+        gate.close();
+        assert!(done.load(Ordering::SeqCst), "close returned while a callback was running");
+        assert!(t.join().unwrap());
+        assert!(!gate.run(|| panic!("ran after close")));
+        // Closing from inside a callback does not wait for itself.
+        let gate = CallbackGate::new();
+        assert!(gate.run(|| gate.close()));
     }
 
     #[test]

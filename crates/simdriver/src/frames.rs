@@ -7,12 +7,16 @@
 //! announced after the last successful (re)open. `on_frame` runs on that worker, so at most
 //! one frame is in the callback at a time; frames announced while it runs pile up in the
 //! channel and collapse to the newest on the next pass.
+//!
+//! Both callbacks run inside a [`CallbackGate`]: once drop returns, neither is running nor
+//! will start (except a drop from inside a callback, which does not wait for itself).
+use crate::helper::CallbackGate;
 use crate::protocol::{FrameMsg, parse_frame_line};
 use crate::shm::{Frame, ShmReader};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread;
+use std::thread::{self, JoinHandle};
 
 enum Msg {
     Shm { name: String, slots: u32, cap: u64 },
@@ -20,12 +24,14 @@ enum Msg {
     Stop,
 }
 
-/// Consumes sdframe lines (feed them through [`FramePipeline::sink`]). Dropping it stops
-/// the worker after any in-flight callback; no further frames are delivered.
+/// Consumes sdframe lines (feed them through [`FramePipeline::sink`]). Drop waits for an
+/// in-flight callback and joins the worker; no callback runs after it returns.
 pub struct FramePipeline {
     tx: Sender<Msg>,
     lines: Arc<AtomicU64>,
     on_note: Arc<dyn Fn(String) + Send + Sync>,
+    gate: Arc<CallbackGate>,
+    worker: Option<JoinHandle<()>>,
 }
 
 impl FramePipeline {
@@ -34,31 +40,50 @@ impl FramePipeline {
         on_note: impl Fn(String) + Send + Sync + 'static,
     ) -> FramePipeline {
         let (tx, rx) = mpsc::channel();
-        thread::Builder::new()
+        let gate = Arc::new(CallbackGate::new());
+        let g = gate.clone();
+        let worker = thread::Builder::new()
             .name("sdframe-pipeline".into())
-            .spawn(move || worker(rx, on_frame))
+            .spawn(move || worker(rx, &g, on_frame))
             .expect("spawn frame pipeline thread");
-        FramePipeline { tx, lines: Arc::new(AtomicU64::new(0)), on_note: Arc::new(on_note) }
+        FramePipeline {
+            tx,
+            lines: Arc::new(AtomicU64::new(0)),
+            on_note: Arc::new(on_note),
+            gate,
+            worker: Some(worker),
+        }
     }
 
-    /// A line consumer for [`crate::helper::Supervised::spawn`]. One per helper process;
-    /// the pipeline itself outlives helper restarts.
+    /// A stdout-line consumer for [`crate::helper::Supervised::spawn`]. One per helper
+    /// process; the pipeline itself outlives helper restarts. Inert once the pipeline drops.
     pub fn sink(&self) -> impl Fn(String) + Send + Sync + 'static {
         let tx = self.tx.clone();
         let lines = self.lines.clone();
         let on_note = self.on_note.clone();
+        let gate = self.gate.clone();
         move |line: String| {
             let msg = match parse_frame_line(&line) {
                 Some(FrameMsg::Shm { name, slots, cap }) => Msg::Shm { name, slots, cap },
                 Some(FrameMsg::Frame { slot, seq }) => Msg::Frame { slot, seq },
                 Some(FrameMsg::Note(n)) => {
-                    on_note(n);
+                    gate.run(|| on_note(n));
                     return;
                 }
                 None => return,
             };
             let _ = tx.send(msg);
             lines.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A stderr-line consumer for [`crate::helper::Supervised::spawn_with_stderr`]: sdframe's
+    /// diagnostics go to `on_note` too.
+    pub fn stderr_sink(&self) -> impl Fn(String) + Send + Sync + 'static {
+        let on_note = self.on_note.clone();
+        let gate = self.gate.clone();
+        move |line: String| {
+            gate.run(|| on_note(line));
         }
     }
 
@@ -70,11 +95,17 @@ impl FramePipeline {
 
 impl Drop for FramePipeline {
     fn drop(&mut self) {
+        self.gate.close();
         let _ = self.tx.send(Msg::Stop);
+        if let Some(w) = self.worker.take()
+            && w.thread().id() != thread::current().id()
+        {
+            let _ = w.join();
+        }
     }
 }
 
-fn worker(rx: Receiver<Msg>, on_frame: impl Fn(Frame)) {
+fn worker(rx: Receiver<Msg>, gate: &CallbackGate, on_frame: impl Fn(Frame)) {
     let mut reader: Option<ShmReader> = None;
     loop {
         let Ok(first) = rx.recv() else { return };
@@ -97,7 +128,7 @@ fn worker(rx: Receiver<Msg>, on_frame: impl Fn(Frame)) {
         if let (Some(r), Some((slot, seq))) = (&reader, newest)
             && let Some(frame) = r.read(slot, seq)
         {
-            on_frame(frame);
+            gate.run(|| on_frame(frame));
         }
     }
 }
@@ -107,7 +138,8 @@ mod tests {
     use super::*;
     use crate::helper::{Supervised, fake_helper};
     use crate::shm::{FrameHeader, ShmWriter};
-    use std::sync::mpsc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Mutex, mpsc};
     use std::time::{Duration, Instant};
 
     const W: Duration = Duration::from_secs(5);
@@ -224,6 +256,66 @@ mod tests {
         let f = r.frames.recv_timeout(W).unwrap();
         assert_eq!((f.seq, f.width, f.height, f.data.len()), (8, 4, 4, 64));
         assert!(r.frames.recv_timeout(Duration::from_millis(200)).is_err(), "torn frame 6 must not be delivered");
+    }
+
+    #[test]
+    fn no_callback_after_drop() {
+        let n = shm_name("dropwait");
+        let w = ShmWriter::create(&n, 3, 16).unwrap();
+        let (in_tx, in_rx) = mpsc::channel();
+        let (ftx, frx) = mpsc::channel();
+        let (ntx, nrx) = mpsc::channel();
+        let done = Arc::new(AtomicBool::new(false));
+        let d = done.clone();
+        let pipeline = FramePipeline::new(
+            move |f: Frame| {
+                let _ = in_tx.send(());
+                std::thread::sleep(Duration::from_millis(300));
+                d.store(true, Ordering::SeqCst);
+                let _ = ftx.send(f.seq);
+            },
+            move |n| {
+                let _ = ntx.send(n);
+            },
+        );
+        let helper = Supervised::spawn(fake_helper(), vec!["echo".into()], pipeline.sink(), |_| {}).unwrap();
+        let sink = pipeline.sink();
+        write_frame(&w, 2);
+        helper.send_line(&format!("{}\n{}", shm_line(&n, 16), frame_line(2)));
+        in_rx.recv_timeout(W).expect("callback entered");
+        drop(pipeline);
+        assert!(done.load(Ordering::SeqCst), "drop returned while on_frame was still running");
+        assert_eq!(frx.recv_timeout(W), Ok(2));
+        // Lines still arriving from the helper (and notes) must not reach the callbacks.
+        write_frame(&w, 4);
+        helper.send_line(&frame_line(4));
+        sink(r#"{"t":"note","detail":"late"}"#.into());
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(frx.try_recv().is_err(), "on_frame ran after drop");
+        assert!(nrx.try_recv().is_err(), "on_note ran after drop");
+    }
+
+    #[test]
+    fn drop_from_inside_on_frame_does_not_deadlock() {
+        let n = shm_name("selfdrop");
+        let w = ShmWriter::create(&n, 3, 16).unwrap();
+        let slot: Arc<Mutex<Option<FramePipeline>>> = Arc::new(Mutex::new(None));
+        let (dtx, drx) = mpsc::channel();
+        let s2 = slot.clone();
+        let pipeline = FramePipeline::new(
+            move |_f| {
+                let p = s2.lock().unwrap().take();
+                drop(p);
+                let _ = dtx.send(());
+            },
+            |_| {},
+        );
+        let sink = pipeline.sink();
+        *slot.lock().unwrap() = Some(pipeline);
+        write_frame(&w, 2);
+        sink(shm_line(&n, 16));
+        sink(frame_line(2));
+        drx.recv_timeout(W).expect("pipeline dropped from inside its own callback");
     }
 
     #[test]

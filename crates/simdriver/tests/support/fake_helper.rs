@@ -8,7 +8,8 @@
 //!                      {"t":"ready","w":393,"h":852}, then appends every stdin line to `<dir>/log`.
 //!                      `{"t":"_invalidate"}` prints {"t":"displaced"}; while displaced, a gesture
 //!                      start (touch/touch2 down, button, key, text) prints {"t":"reclaimed"}.
-//!                      `{"t":"_exit","code":N}` exits with N. Exit 0 on stdin EOF.
+//!                      `{"t":"_exit","code":N}` prints "fake_helper: exiting N" on stderr and
+//!                      exits with N. Exit 0 on stdin EOF.
 //!   lines <code> <l>…  print each argument as a line, then exit with <code>.
 //!   stubborn           ignore SIGINT and stdin EOF; sleep until killed.
 use std::io::{BufRead, Read, Write};
@@ -79,7 +80,9 @@ fn hid(dir: PathBuf) {
             continue;
         }
         if let Some(rest) = line.strip_prefix(r#"{"t":"_exit","code":"#) {
-            std::process::exit(rest.trim_end_matches('}').parse().unwrap());
+            let code: i32 = rest.trim_end_matches('}').parse().unwrap();
+            eprintln!("fake_helper: exiting {code}");
+            std::process::exit(code);
         }
         let start = line.contains(r#""p":"down""#)
             || [r#""t":"button""#, r#""t":"key""#, r#""t":"text""#].iter().any(|t| line.contains(t));

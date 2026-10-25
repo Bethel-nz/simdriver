@@ -7,10 +7,14 @@
 //! owner may call back into the client). Each helper process gets a generation number; lines
 //! and exits from an older generation (after `restart`/`stop`) are ignored.
 //!
+//! `on_event` runs inside a [`CallbackGate`]: once `stop` (or drop) returns, no event is
+//! being delivered or will be (a `stop` from inside `on_event` does not wait for itself).
+//! `stop` is terminal: `restart` afterwards spawns nothing.
+//!
 //! Displacement does not gate sending: while displaced, sdhid itself drops everything but a
 //! gesture start, and a gesture start is how it reclaims, so commands keep flowing.
 use crate::error::Error;
-use crate::helper::Supervised;
+use crate::helper::{CallbackGate, Supervised, lock};
 use crate::protocol::{HidCmd, HidMsg, Phase, parse_hid_line};
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -27,9 +31,12 @@ pub enum HidEvent {
     Reclaimed,
     Warn(String),
     Error(String),
-    /// The current helper exited (code, `None` if killed by a signal). The owner decides
-    /// whether and when to `restart`; commands queue meanwhile.
-    Exited(Option<i32>),
+    /// A line sdhid wrote to stderr (diagnostics; not forwarded anywhere else).
+    Note(String),
+    /// The current helper exited (`code` is `None` if killed by a signal; `last_stderr` is
+    /// its last stderr line). The owner decides whether and when to `restart`; commands
+    /// queue meanwhile. Not reported for a helper replaced by `restart` or ended by `stop`.
+    Exited { code: Option<i32>, last_stderr: Option<String> },
 }
 
 fn is_move(cmd: &HidCmd) -> bool {
@@ -40,8 +47,11 @@ fn is_move(cmd: &HidCmd) -> bool {
 }
 
 /// Pending commands (before `Ready` / while restarting). Bounded at [`QUEUE_CAP`] by
-/// evicting the oldest move; with no move left to evict, new moves are refused. Starts,
-/// ends, buttons, keys and text are never dropped (they may take the queue past the cap).
+/// evicting the oldest move; with no move left to evict, new moves are refused.
+///
+/// The queue may exceed [`QUEUE_CAP`] only through non-moves: starts, ends, buttons, keys
+/// and text are never dropped (losing a down or an up would leave a gesture half-done), so
+/// once the queue holds no moves they are still appended.
 #[derive(Default)]
 struct Queue {
     q: VecDeque<HidCmd>,
@@ -93,14 +103,19 @@ struct Shared {
     state: Mutex<State>,
     /// Serializes `restart`/`stop` (spawning happens outside the state lock).
     lifecycle: Mutex<()>,
+    gate: CallbackGate,
     on_event: Box<dyn Fn(HidEvent) + Send + Sync>,
 }
 
 impl Shared {
+    fn emit(&self, ev: HidEvent) {
+        self.gate.run(|| (self.on_event)(ev));
+    }
+
     fn on_line(&self, generation: u64, line: &str) {
         let Some(msg) = parse_hid_line(line) else { return };
         let ev = {
-            let mut st = self.state.lock().unwrap();
+            let mut st = lock(&self.state);
             if st.generation != generation {
                 return;
             }
@@ -124,18 +139,24 @@ impl Shared {
                 HidMsg::Error(e) => HidEvent::Error(e),
             }
         };
-        (self.on_event)(ev);
+        self.emit(ev);
     }
 
-    fn on_exit(&self, generation: u64, code: Option<i32>) {
+    fn on_stderr(&self, generation: u64, line: String) {
+        if lock(&self.state).generation == generation {
+            self.emit(HidEvent::Note(line));
+        }
+    }
+
+    fn on_exit(&self, generation: u64, code: Option<i32>, last_stderr: Option<String>) {
         {
-            let mut st = self.state.lock().unwrap();
+            let mut st = lock(&self.state);
             if st.generation != generation {
                 return;
             }
             st.ready = false;
         }
-        (self.on_event)(HidEvent::Exited(code));
+        self.emit(HidEvent::Exited { code, last_stderr });
     }
 }
 
@@ -164,6 +185,7 @@ impl HidClient {
                 queue: Queue::default(),
             }),
             lifecycle: Mutex::new(()),
+            gate: CallbackGate::new(),
             on_event: Box::new(on_event),
         });
         let client = HidClient { shared };
@@ -173,7 +195,7 @@ impl HidClient {
 
     /// Send now if the helper is ready, else queue (see [`Queue`]). Ignored after `stop`.
     pub fn send(&self, cmd: HidCmd) {
-        let mut st = self.shared.state.lock().unwrap();
+        let mut st = lock(&self.shared.state);
         if st.stopped {
             return;
         }
@@ -188,39 +210,42 @@ impl HidClient {
     /// Write a raw line to the current helper, bypassing the queue (e.g. sdhid's test-only
     /// `{"t":"_invalidate"}`). Dropped if there is no helper.
     pub fn send_raw_line(&self, line: &str) {
-        if let Some(h) = self.shared.state.lock().unwrap().helper.as_ref() {
+        if let Some(h) = lock(&self.shared.state).helper.as_ref() {
             h.send_line(line);
         }
     }
 
     /// Device screen size in points, from the latest `ready`.
     pub fn screen_pt(&self) -> Option<(f64, f64)> {
-        self.shared.state.lock().unwrap().screen
+        lock(&self.shared.state).screen
     }
 
     pub fn is_displaced(&self) -> bool {
-        self.shared.state.lock().unwrap().displaced
+        lock(&self.shared.state).displaced
     }
 
     pub fn pid(&self) -> Option<u32> {
-        self.shared.state.lock().unwrap().helper.as_ref().map(Supervised::pid)
+        lock(&self.shared.state).helper.as_ref().map(Supervised::pid)
     }
 
     /// Stop the current helper (if any) and spawn a fresh one. Commands queue until its
-    /// `ready`; queued ones survive the restart. Also revives a stopped client.
+    /// `ready`; queued ones survive the restart. After `stop` this does nothing (`Ok`).
     pub fn restart(&self) -> Result<(), Error> {
-        let _l = self.shared.lifecycle.lock().unwrap();
+        let _l = lock(&self.shared.lifecycle);
         let (generation, old) = {
-            let mut st = self.shared.state.lock().unwrap();
+            let mut st = lock(&self.shared.state);
+            if st.stopped {
+                return Ok(());
+            }
             st.generation += 1;
             st.ready = false;
             st.displaced = false;
-            st.stopped = false;
             (st.generation, st.helper.take())
         };
         drop(old); // stop() outside the state lock: it may wait up to 250 ms
-        let (s1, s2) = (Arc::downgrade(&self.shared), Arc::downgrade(&self.shared));
-        let helper = Supervised::spawn(
+        let (s1, s2, s3) =
+            (Arc::downgrade(&self.shared), Arc::downgrade(&self.shared), Arc::downgrade(&self.shared));
+        let helper = Supervised::spawn_with_stderr(
             self.shared.bin.clone(),
             self.shared.args.clone(),
             move |line| {
@@ -228,29 +253,42 @@ impl HidClient {
                     sh.on_line(generation, &line);
                 }
             },
-            move |code| {
+            move |line| {
                 if let Some(sh) = s2.upgrade() {
-                    sh.on_exit(generation, code);
+                    sh.on_stderr(generation, line);
+                }
+            },
+            move |code, last| {
+                if let Some(sh) = s3.upgrade() {
+                    sh.on_exit(generation, code, last);
                 }
             },
         )?;
-        let mut st = self.shared.state.lock().unwrap();
+        let mut st = lock(&self.shared.state);
+        if st.stopped || st.generation != generation {
+            // stop() ran while we were spawning (it does not take the lifecycle lock).
+            drop(st);
+            drop(helper);
+            return Ok(());
+        }
         st.helper = Some(helper);
         st.flush(); // `ready` may have arrived before the helper was stored
         Ok(())
     }
 
-    /// Stop the helper and drop queued commands; later sends are ignored. Idempotent.
+    /// Terminal: stop the helper, drop queued commands, ignore later sends and restarts.
+    /// Returns once no `on_event` is running (unless called from inside one) and none will
+    /// start. Idempotent; never blocks on `restart` (it does not take the lifecycle lock).
     pub fn stop(&self) {
-        let _l = self.shared.lifecycle.lock().unwrap();
         let old = {
-            let mut st = self.shared.state.lock().unwrap();
+            let mut st = lock(&self.shared.state);
             st.generation += 1;
             st.ready = false;
             st.stopped = true;
             st.queue.drain().for_each(drop);
             st.helper.take()
         };
+        self.shared.gate.close();
         drop(old);
     }
 }
@@ -267,7 +305,8 @@ mod tests {
     use crate::helper::{fake_helper, pid_gone};
     use crate::protocol::{Edge, Phase};
     use std::path::Path;
-    use std::sync::mpsc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, mpsc};
     use std::time::{Duration, Instant};
 
     const W: Duration = Duration::from_secs(5);
@@ -294,20 +333,23 @@ mod tests {
 
     impl Fake {
         fn new(tag: &str) -> Fake {
+            let (tx, rx) = mpsc::channel();
+            let tx = std::sync::Mutex::new(tx);
+            let mut f = Fake::with(tag, move |e| {
+                let _ = tx.lock().unwrap().send(e);
+            });
+            f.events = rx;
+            f
+        }
+
+        fn with(tag: &str, on_event: impl Fn(HidEvent) + Send + Sync + 'static) -> Fake {
             let dir = std::env::temp_dir().join(format!("sdhid-fake-{}-{tag}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
-            let (tx, rx) = mpsc::channel();
-            let tx = std::sync::Mutex::new(tx);
-            let client = HidClient::spawn(
-                fake_helper(),
-                vec!["hid".into(), dir.to_string_lossy().into_owned()],
-                move |e| {
-                    let _ = tx.lock().unwrap().send(e);
-                },
-            )
-            .unwrap();
-            Fake { dir, client, events: rx }
+            let client =
+                HidClient::spawn(fake_helper(), vec!["hid".into(), dir.to_string_lossy().into_owned()], on_event)
+                    .unwrap();
+            Fake { dir, client, events: mpsc::channel().1 }
         }
 
         fn go(&self) {
@@ -317,7 +359,7 @@ mod tests {
         fn expect(&self, want: HidEvent) {
             loop {
                 match self.events.recv_timeout(W) {
-                    Ok(HidEvent::Warn(_)) => continue,
+                    Ok(HidEvent::Warn(_) | HidEvent::Note(_)) => continue,
                     got => {
                         assert_eq!(got.ok(), Some(want));
                         return;
@@ -426,7 +468,7 @@ mod tests {
         f.expect(HidEvent::Ready { w: 393.0, h: 852.0 });
         let old = f.client.pid().unwrap();
         f.client.send_raw_line(r#"{"t":"_exit","code":5}"#);
-        f.expect(HidEvent::Exited(Some(5)));
+        f.expect(HidEvent::Exited { code: Some(5), last_stderr: Some("fake_helper: exiting 5".into()) });
         f.client.send(touch(Phase::Down, 3.0));
         f.client.send(touch(Phase::Up, 3.0));
         f.client.restart().unwrap();
@@ -434,6 +476,71 @@ mod tests {
         f.expect(HidEvent::Ready { w: 393.0, h: 852.0 });
         let got = f.sync(9997);
         assert_eq!(got, vec![touch(Phase::Down, 3.0).to_line(), touch(Phase::Up, 3.0).to_line()]);
+    }
+
+    #[test]
+    fn no_event_after_stop() {
+        let (in_tx, in_rx) = mpsc::channel();
+        let in_tx = Mutex::new(in_tx);
+        let (etx, erx) = mpsc::channel();
+        let etx = Mutex::new(etx);
+        let done = Arc::new(AtomicBool::new(false));
+        let d = done.clone();
+        let f = Fake::with("nolate", move |e| {
+            let ready = matches!(e, HidEvent::Ready { .. });
+            let _ = etx.lock().unwrap().send(e);
+            if ready {
+                let _ = in_tx.lock().unwrap().send(());
+                std::thread::sleep(Duration::from_millis(300));
+                d.store(true, Ordering::SeqCst);
+            }
+        });
+        f.go();
+        in_rx.recv_timeout(W).expect("on_event entered");
+        f.client.stop();
+        assert!(done.load(Ordering::SeqCst), "stop returned while on_event was still running");
+        assert!(matches!(erx.recv_timeout(W), Ok(HidEvent::Ready { .. })));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(erx.try_recv().ok(), None, "on_event ran after stop (e.g. Exited)");
+    }
+
+    #[test]
+    fn stop_from_inside_on_event_does_not_deadlock() {
+        let dir = std::env::temp_dir().join(format!("sdhid-fake-{}-selfstop", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let slot: Arc<Mutex<Option<std::sync::Weak<HidClient>>>> = Arc::new(Mutex::new(None));
+        let (dtx, drx) = mpsc::channel();
+        let dtx = Mutex::new(dtx);
+        let s2 = slot.clone();
+        let client = Arc::new(
+            HidClient::spawn(fake_helper(), vec!["hid".into(), dir.to_string_lossy().into_owned()], move |e| {
+                if matches!(e, HidEvent::Ready { .. }) {
+                    let c = s2.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade);
+                    if let Some(c) = c {
+                        c.stop();
+                        let _ = dtx.lock().unwrap().send(c.pid());
+                    }
+                }
+            })
+            .unwrap(),
+        );
+        *slot.lock().unwrap() = Some(Arc::downgrade(&client));
+        let pid = client.pid().unwrap();
+        std::fs::write(dir.join("go"), b"").unwrap();
+        assert_eq!(drx.recv_timeout(W), Ok(None), "stop() from inside on_event returned, helper released");
+        assert!(pid_gone(pid));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restart_after_stop_is_noop() {
+        let f = Fake::new("stoprestart");
+        let pid = f.client.pid().unwrap();
+        f.client.stop();
+        assert!(f.client.restart().is_ok());
+        assert_eq!(f.client.pid(), None, "restart after stop must not spawn a helper");
+        assert!(pid_gone(pid));
     }
 
     #[test]

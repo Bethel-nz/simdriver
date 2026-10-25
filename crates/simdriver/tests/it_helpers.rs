@@ -176,6 +176,7 @@ fn it_hid_client_ready_displaced_reclaimed() {
             let left = within.saturating_sub(t0.elapsed());
             match rx.recv_timeout(left) {
                 Ok(HidEvent::Warn(w)) => seen.push(format!("warn({w})")),
+                Ok(HidEvent::Note(n)) => seen.push(format!("note({n})")),
                 Ok(e) => {
                     seen.push(format!("{e:?}"));
                     let name = format!("{e:?}");
