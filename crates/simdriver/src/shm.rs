@@ -5,10 +5,10 @@
 //!   slot i at 64 + i * (64 + cap):
 //!     slot header, 64 bytes: [seq u64][width u32][height u32][source_width u32][source_height u32][bpp u32 = 4]
 //!     pixels, `cap` bytes
-//! Seqlock: writer stores seq = 2k+1 (Release), writes header+pixels, stores 2k+2 (Release).
-// Consumed by later tasks; pub(crate) items aren't reachable via __internal.
-#![allow(dead_code)]
-
+//! `cap` must be a multiple of 64 (writer rounds w*h*4 up to 64); the reader rejects cap % 8 != 0
+//! so every slot's seq word stays 8-byte aligned.
+//! Seqlock: writer stores seq = 2k+1 (Relaxed), then fence(Release), then writes header+pixels,
+//! then stores 2k+2 (Release). Reader: load seq (Acquire), copy, fence(Acquire), reload seq.
 use crate::error::Error;
 use std::ffi::CString;
 use std::sync::atomic::{AtomicU64, Ordering, fence};
@@ -33,11 +33,15 @@ fn last_os(what: &str) -> Error {
     Error::Shm(format!("{what}: {}", std::io::Error::last_os_error()))
 }
 
-fn total_len(slots: u32, cap: u64) -> usize {
-    FILE_HEADER + slots as usize * (SLOT_HEADER + cap as usize)
+fn total_len(slots: u32, cap: u64) -> Result<usize, Error> {
+    let overflow = || Error::Shm("segment size overflow".into());
+    let cap = usize::try_from(cap).map_err(|_| overflow())?;
+    let stride = SLOT_HEADER.checked_add(cap).ok_or_else(overflow)?;
+    let body = stride.checked_mul(slots as usize).ok_or_else(overflow)?;
+    FILE_HEADER.checked_add(body).ok_or_else(overflow)
 }
 
-pub(crate) struct ShmReader {
+pub struct ShmReader {
     base: *const u8,
     len: usize,
     slots: u32,
@@ -49,12 +53,15 @@ unsafe impl Send for ShmReader {}
 unsafe impl Sync for ShmReader {}
 
 impl ShmReader {
-    pub(crate) fn open(name: &str, slots: u32, cap: u64) -> Result<ShmReader, Error> {
+    pub fn open(name: &str, slots: u32, cap: u64) -> Result<ShmReader, Error> {
         if slots == 0 {
             return Err(Error::Shm("zero slots".into()));
         }
         let cname = CString::new(name).map_err(|_| Error::Shm("bad name".into()))?;
-        let len = total_len(slots, cap);
+        if cap % 8 != 0 {
+            return Err(Error::Shm(format!("cap {cap} not a multiple of 8")));
+        }
+        let len = total_len(slots, cap)?;
         unsafe {
             let fd = libc::shm_open(cname.as_ptr(), libc::O_RDONLY, 0);
             if fd < 0 {
@@ -96,7 +103,7 @@ impl ShmReader {
     }
 
     /// Copy out the frame in `slot` if it still carries `seq`; None if torn or overwritten.
-    pub(crate) fn read(&self, slot: u32, seq: u64) -> Option<Frame> {
+    pub fn read(&self, slot: u32, seq: u64) -> Option<Frame> {
         if slot >= self.slots || seq % 2 != 0 {
             return None;
         }
@@ -156,7 +163,7 @@ pub(crate) struct ShmWriter {
 impl ShmWriter {
     pub(crate) fn create(name: &str, slots: u32, cap: u64) -> Result<ShmWriter, Error> {
         let cname = CString::new(name).map_err(|_| Error::Shm("bad name".into()))?;
-        let len = total_len(slots, cap);
+        let len = total_len(slots, cap)?;
         unsafe {
             let fd = libc::shm_open(cname.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, 0o600);
             if fd < 0 {
@@ -204,9 +211,10 @@ impl ShmWriter {
         self.finish(slot, seq_even);
     }
 
-    /// Start a write: store the odd value only (leaves the slot "torn").
+    /// Start a write: Relaxed odd store then Release fence (leaves the slot "torn").
     pub(crate) fn begin(&self, slot: u32, seq_even: u64) {
-        unsafe { AtomicU64::from_ptr(self.slot_ptr(slot) as *mut u64).store(seq_even - 1, Ordering::Release) }
+        unsafe { AtomicU64::from_ptr(self.slot_ptr(slot) as *mut u64).store(seq_even - 1, Ordering::Relaxed) }
+        fence(Ordering::Release);
     }
 
     pub(crate) fn finish(&self, slot: u32, seq_even: u64) {
@@ -290,5 +298,18 @@ mod tests {
         let _w = ShmWriter::create(&n, 3, 16).unwrap();
         assert!(ShmReader::open(&n, 3, 32).is_err());
         assert!(ShmReader::open(&n, 2, 16).is_err());
+    }
+
+    #[test]
+    fn open_rejects_misaligned_cap() {
+        let n = name("align");
+        let _w = ShmWriter::create(&n, 3, 20).unwrap();
+        assert!(matches!(ShmReader::open(&n, 3, 20), Err(Error::Shm(_))));
+    }
+
+    #[test]
+    fn total_len_overflow_is_error() {
+        assert!(total_len(u32::MAX, u64::MAX / 2).is_err());
+        assert!(total_len(3, 16).is_ok());
     }
 }

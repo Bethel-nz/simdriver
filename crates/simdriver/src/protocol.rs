@@ -1,6 +1,4 @@
 //! JSON-lines wire protocol between the Rust core and the native helpers.
-// Consumed by later tasks (session/hid/frame pumps); pub(crate) items aren't reachable via __internal.
-#![allow(dead_code)]
 
 use serde_json::Value;
 
@@ -23,7 +21,7 @@ impl Phase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Edge {
+pub enum Edge {
     None,
     Top,
     Left,
@@ -45,13 +43,13 @@ impl Edge {
 
 /// Messages from the frame helper (stdout).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FrameMsg {
+pub enum FrameMsg {
     Shm { name: String, slots: u32, cap: u64 },
     Frame { slot: u32, seq: u64 },
     Note(String),
 }
 
-pub(crate) fn parse_frame_line(line: &str) -> Option<FrameMsg> {
+pub fn parse_frame_line(line: &str) -> Option<FrameMsg> {
     let v: Value = serde_json::from_str(line.trim()).ok()?;
     match v.get("t")?.as_str()? {
         "shm" => Some(FrameMsg::Shm {
@@ -72,7 +70,7 @@ pub(crate) fn parse_frame_line(line: &str) -> Option<FrameMsg> {
 
 /// Messages from the HID helper (stdout).
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum HidMsg {
+pub enum HidMsg {
     Ready { w: f64, h: f64 },
     Warn(String),
     Error(String),
@@ -80,7 +78,7 @@ pub(crate) enum HidMsg {
     Reclaimed,
 }
 
-pub(crate) fn parse_hid_line(line: &str) -> Option<HidMsg> {
+pub fn parse_hid_line(line: &str) -> Option<HidMsg> {
     let v: Value = serde_json::from_str(line.trim()).ok()?;
     let detail = || v.get("detail").and_then(Value::as_str).unwrap_or("").to_string();
     match v.get("t")?.as_str()? {
@@ -98,7 +96,7 @@ pub(crate) fn parse_hid_line(line: &str) -> Option<HidMsg> {
 
 /// Commands to the HID helper (stdin).
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum HidCmd {
+pub enum HidCmd {
     Touch { phase: Phase, x: f64, y: f64, edge: Edge },
     Touch2 { phase: Phase, x1: f64, y1: f64, x2: f64, y2: f64 },
     Button { name: &'static str, presses: u32, hold_secs: f32 },
@@ -108,7 +106,7 @@ pub(crate) enum HidCmd {
 
 impl HidCmd {
     /// One JSON line (no trailing newline) in simhid's stdin format.
-    pub(crate) fn to_line(&self) -> String {
+    pub fn to_line(&self) -> String {
         match self {
             HidCmd::Touch { phase, x, y, edge } => format!(
                 r#"{{"t":"touch","p":"{}","x":{:?},"y":{:?},"e":{}}}"#,
@@ -145,7 +143,7 @@ impl HidCmd {
     }
 
     /// True for commands that begin a new gesture (as opposed to continuing one).
-    pub(crate) fn is_gesture_start(&self) -> bool {
+    pub fn is_gesture_start(&self) -> bool {
         match self {
             HidCmd::Touch { phase, .. } | HidCmd::Touch2 { phase, .. } => *phase == Phase::Down,
             HidCmd::Button { .. } | HidCmd::Key { .. } | HidCmd::Text(_) => true,
