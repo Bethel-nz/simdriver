@@ -116,14 +116,16 @@ const screen = new BgraCanvas(canvas);
 const state = document.getElementById('state');
 const sd = window.simdriver;
 
-// Fit the canvas inside the box at the frame's aspect (CSS size only; the backing size
-// is the frame's). Re-fit when the window resizes or the frame size changes.
+// Show the screen at a phone's size (874 CSS px tall, an iPhone Pro's height in points),
+// centred; shrink only when the window is smaller. CSS size only — the backing size is
+// the frame's. Re-fit when the window resizes or the frame size changes.
+const PHONE_HEIGHT = 874;
 const box = document.getElementById('box');
 let aspect = 0;
 function fit() {
   if (!aspect) return;
   const { width: bw, height: bh } = box.getBoundingClientRect();
-  const w = Math.min(bw, bh * aspect);
+  const w = Math.min(bw, bh * aspect, PHONE_HEIGHT * aspect);
   canvas.style.width = `${Math.floor(w)}px`;
   canvas.style.height = `${Math.floor(w / aspect)}px`;
 }
