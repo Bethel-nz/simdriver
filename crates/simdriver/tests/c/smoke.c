@@ -23,6 +23,12 @@ int main(void) {
 
     // NULL-safety on every entry point.
     sd_stop(NULL);
+    // ...and the next call that succeeds clears the error.
+    err = sd_last_error();
+    if (err == NULL || err[0] != '\0') {
+        fprintf(stderr, "sd_last_error must be empty after a successful call, got: %s\n", err ? err : "(null)");
+        return 1;
+    }
     sd_pointer(NULL, 0, 0.5, 0.5, 0);
     sd_scroll(NULL, 1, 0.5, 0.5, 0.0, -0.1);
     if (sd_key(NULL, "enter")) {

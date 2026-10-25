@@ -49,15 +49,14 @@ fn header_is_current() {
 fn c_smoke() {
     let debug = workspace_target_debug();
     let dylib = debug.join("libsimdriver.dylib");
-    if !dylib.is_file() {
-        // cargo test does not necessarily build the cdylib; the outer cargo has
-        // released the target-dir lock by the time tests run.
-        let st = Command::new(env!("CARGO"))
-            .args(["build", "-p", "simdriver", "--lib"])
-            .status()
-            .expect("run cargo build for the cdylib");
-        assert!(st.success(), "cargo build -p simdriver --lib failed");
-    }
+    // Always build: cargo test does not necessarily build the cdylib, and an existing one
+    // may be stale (testing it would miss ffi.rs changes). A no-op when it is current; the
+    // outer cargo has released the target-dir lock by the time tests run.
+    let st = Command::new(env!("CARGO"))
+        .args(["build", "-p", "simdriver", "--lib"])
+        .status()
+        .expect("run cargo build for the cdylib");
+    assert!(st.success(), "cargo build -p simdriver --lib failed");
     assert!(dylib.is_file(), "{} missing after build", dylib.display());
 
     let out = debug.join(format!("c_smoke-{}", std::process::id()));

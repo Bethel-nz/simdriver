@@ -66,6 +66,11 @@ fn set_error(msg: impl Deref<Target = str>) {
     });
 }
 
+/// Each `sd_` call starts with no error, so `sd_last_error` is empty after a success.
+fn clear_error() {
+    LAST_ERROR.with(|slot| *slot.borrow_mut() = None);
+}
+
 fn panic_text(e: Box<dyn std::any::Any + Send>) -> String {
     e.downcast_ref::<String>().map(String::as_str).unwrap_or_else(|| {
         e.downcast_ref::<&str>().map(|s| *s).unwrap_or("panic with a non-string payload")
@@ -175,6 +180,7 @@ pub unsafe extern "C" fn sd_start(
     state_cb: sd_state_cb,
     user: *mut c_void,
 ) -> *mut sd_driver {
+    clear_error();
     let mut run = || -> Result<*mut sd_driver, String> {
         let selector = if udid.is_null() {
             DeviceSelector::FirstBootedOrIphone
@@ -212,6 +218,7 @@ pub unsafe extern "C" fn sd_start(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sd_pointer(d: *mut sd_driver, phase_code: i32, x: f64, y: f64, mask: u32) {
+    clear_error();
     if d.is_null() { return; }
     let d = unsafe { &*d };
     let _ = guarded(AssertUnwindSafe(|| {
@@ -230,6 +237,7 @@ pub unsafe extern "C" fn sd_scroll(
     dx: f64,
     dy: f64,
 ) {
+    clear_error();
     if d.is_null() { return; }
     let d = unsafe { &*d };
     let _ = guarded(AssertUnwindSafe(|| {
@@ -241,6 +249,7 @@ pub unsafe extern "C" fn sd_scroll(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sd_key(d: *mut sd_driver, name: *const c_char) -> bool {
+    clear_error();
     if d.is_null() { return false; }
     let d = unsafe { &*d };
     let name = match utf8(name, "name") {
@@ -261,6 +270,7 @@ pub unsafe extern "C" fn sd_key(d: *mut sd_driver, name: *const c_char) -> bool 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sd_text(d: *mut sd_driver, s: *const c_char) {
+    clear_error();
     if d.is_null() { return; }
     let d = unsafe { &*d };
     let s = match utf8(s, "text") {
@@ -275,6 +285,7 @@ pub unsafe extern "C" fn sd_text(d: *mut sd_driver, s: *const c_char) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sd_button(d: *mut sd_driver, button_code: i32, presses: u32, hold_secs: f32) {
+    clear_error();
     if d.is_null() { return; }
     let d = unsafe { &*d };
     let _ = guarded(AssertUnwindSafe(|| {
@@ -287,6 +298,7 @@ pub unsafe extern "C" fn sd_button(d: *mut sd_driver, button_code: i32, presses:
 /// Stops the driver and frees the handle. NULL-safe; the handle must not be used after.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sd_stop(d: *mut sd_driver) {
+    clear_error();
     if d.is_null() {
         return;
     }
