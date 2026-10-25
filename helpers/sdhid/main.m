@@ -168,12 +168,13 @@ static SimDevice *findDevice(NSString *udid) {
 /// dtuhidd answers its liveness barrier while the guest is still coming up — right after
 /// a shutdown+boot — so a connect then yields a Ready helper whose digitizer events iOS
 /// silently drops (observed in the reboot IT). On a device that is already fully up this
-/// returns immediately. Best effort: `xcrun` unavailable counts as done.
+/// returns immediately. Best effort: `xcrun` unavailable counts as done. No `-b`: that
+/// would boot a device that shut down after our Booted check, and booting is the host's call.
 static BOOL waitBootstatus(NSString *udid) {
   NSString *dev = currentDeveloperDir();
   if (dev.length == 0) return YES;
   FILE *pipe = popen(
-      [[NSString stringWithFormat:@"'%@/usr/bin/simctl' bootstatus -b '%@' 2>/dev/null", dev, udid] UTF8String],
+      [[NSString stringWithFormat:@"'%@/usr/bin/simctl' bootstatus '%@' 2>/dev/null", dev, udid] UTF8String],
       "r");
   if (pipe == NULL) return YES;
   char line[256];
