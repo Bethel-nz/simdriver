@@ -1,13 +1,26 @@
 /**
- * simframe — native iOS-simulator frame pump for pip-mini (approach 2).
+ * sdframe — native iOS-simulator frame pump for simdriver (derived from
+ * pip-mini's simframe).
  *
- * Chain (all inside one long-lived process, zero per-frame work on the JS side):
+ * Chain (all inside one long-lived process):
  *
  *   SimDeviceSet -----> SimDevice.UDID match
  *   SimDevice.io -----> SimDeviceIOClient -ioPorts
  *   port.descriptor --> id<SimScreen> (new-style) else id<SimDisplayRenderable> (legacy)
  *   frameRendered/damage ------> IOSurface lock + packed (optionally downscaled) BGRA
- *   stdout --------------------> [FRM2 magic | u32 w | u32 h | u32 bpp | u32 srcW | u32 srcH | pixels...]
+ *   shared memory -------------> composed straight into ring slot n % 3 under a seqlock
+ *   stdout --------------------> JSON lines only:
+ *                                {"t":"shm","name":"/sdf-<pid>-<gen>","slots":3,"cap":N}
+ *                                {"t":"frame","slot":S,"seq":Q}
+ *
+ * Segment layout (little-endian; contract with crates/simdriver/src/shm.rs):
+ *   file header, 64 bytes: [magic u32 0x31464453][version u32 1][slots u32][pad u32][cap u64]
+ *   slot i at 64 + i * (64 + cap):
+ *     slot header, 64 bytes: [seq u64][width u32][height u32][source_width u32][source_height u32][bpp u32 = 4]
+ *     pixels, cap bytes (cap = w*h*4 rounded up to 64)
+ * Seqlock writer: seq = 2k+1 (relaxed), release fence, header + pixels, seq = 2k+2
+ * (release); the frame line carries the even value. A new segment generation is
+ * created whenever the output size changes; the previous one is unlinked 1 s later.
  *
  * srcW/srcH are the device framebuffer's own pixel dims, so the consumer can
  * map input to device points even when --scale shrinks the payload.
@@ -15,12 +28,14 @@
  * Threading: every callback family AND the seed-watchdog poll run on ONE
  * serial queue (g_frameQueue). They share strong references (held surface,
  * current surface); touching those from two queues over-releases and
- * segfaults within a second at 60fps.
+ * segfaults within a second at 60fps. stdout lines go out on a separate
+ * writer queue so a slow reader never blocks the frame queue.
  *
  * Private framework protocols use Meta's vendored headers (PrivateHeaders/).
  * Not a TCC screen capture: the framebuffer is the device's own GPU surface.
  *
- * Usage: simframe <udid> [--fps 60] [--scale 2] [--verbose]
+ * Usage: sdframe <udid> [--fps 60] [--scale 2] [--verbose]
+ * Stops (unlinking its segments) on stdin EOF, SIGINT, SIGTERM or parent exit.
  * Exit codes: 0 ok/stop, 2 usage, 3 device not found/not booted, 4 no surface.
  */
 
@@ -47,24 +62,45 @@
 #import "CoreSimDeviceIO/SimDisplayDescriptorState-Protocol.h"
 #import "CoreSimDeviceIO/SimDeviceIOPortInterface-Protocol.h"
 
-static const uint32_t FFMAGIC_LE = 0x324D5246; // bytes "F","R","M","2" read as LE u32
-static const NSUInteger FRAME_HEADER = 24;      // magic + w + h + bpp + srcW + srcH
-
 #import <os/lock.h>
+#import <stdatomic.h>
+#import <sys/mman.h>
+#import <fcntl.h>
+
+static const uint32_t SHM_MAGIC = 0x31464453;   // bytes "S","D","F","1" read as LE u32
+static const uint32_t SHM_VERSION = 1;
+static const uint32_t SHM_SLOTS = 3;
+static const size_t SHM_FILE_HEADER = 64;
+static const size_t SHM_SLOT_HEADER = 64;
 
 // The one serial queue all surface state lives on (see header comment).
 static dispatch_queue_t g_frameQueue = nil;
 static BOOL g_verbose = NO;     // per-frame notes on stderr (off: they cost a write per frame)
 static NSUInteger g_scale = 1;  // integer downscale factor for the emitted payload
+static BOOL g_stopping = NO;    // set on the frame queue by requestStop
 
-// Single-consumer mailbox for the emit path (see handleFrameRendered).
+// Current shm segment (frame queue only).
+static uint8_t *g_shmBase = NULL;
+static size_t g_shmLen = 0;
+static uint64_t g_shmCap = 0;
+static NSUInteger g_shmWidth = 0;
+static NSUInteger g_shmHeight = 0;
+static unsigned g_shmGen = 0;
+static NSString *g_shmName = nil;
+static uint64_t g_framesWritten = 0; // across generations; frame n gets seq 2n
+
+// Line mailbox for the stdout writer (see handleFrameRendered). Everything
+// below is guarded by g_mailboxLock: the writer runs on its own queue.
 static os_unfair_lock g_mailboxLock = OS_UNFAIR_LOCK_INIT;
-static NSMutableData *g_slot = nil;      // composed frame, waiting to write
-static BOOL g_writing = NO;              // writer loop in flight
-static NSMutableData *g_recycled = nil;  // finished-write buffer, next reusable
+static NSMutableArray<NSString *> *g_pendingShmLines = nil; // never dropped, written first
+static BOOL g_framePending = NO;     // latest frame line wins
+static uint32_t g_pendingSlot = 0;
+static uint64_t g_pendingSeq = 0;
+static BOOL g_writing = NO;          // writer loop in flight
 static dispatch_queue_t g_writerQueue = nil;
-// Compose-time surface identity attached to the emit note. Written and read
-// only under g_mailboxLock (the writer runs on its own queue).
+// Segment names this process still has linked; requestStop unlinks them all.
+static NSMutableArray<NSString *> *g_linkedShmNames = nil;
+// Compose-time surface identity attached to the emit note.
 static IOSurfaceID g_noteId = 0;
 static NSUInteger g_noteSeed = 0;
 static NSString *g_noteSource = @""; // which lane produced the frame
@@ -108,8 +144,170 @@ static void downscale2xBGRA(const uint8_t *src, size_t srcStride, uint8_t *dst,
 }
 
 static void emitNote(NSString *line) {
-  fprintf(stderr, "[simframe] %s\n", line.UTF8String);
+  fprintf(stderr, "[sdframe] %s\n", line.UTF8String);
   fflush(stderr);
+}
+
+static void requestStop(int signalNumber);
+
+// ─── stdout line writer ─────────────────────────────────────────────────────
+// Single-consumer mailbox. The frame queue may NEVER block on the consumer:
+// the render server that delivers these callbacks blocks in turn, so write(2)
+// lives on the writer queue. While a write is in flight, newer frame lines
+// overwrite the pending one (latest wins; the slot it names would be lapped
+// soon anyway). shm lines are never dropped and always go out before the
+// pending frame line, which is cleared whenever a new segment is announced.
+
+static BOOL writeAllStdout(const char *bytes, size_t left) {
+  // Raw write(2), not stdio: a writer blocked in fwrite holds stdout's FILE
+  // lock, and exit()'s flush then deadlocks on it.
+  while (left > 0) {
+    ssize_t n = write(STDOUT_FILENO, bytes, left);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) return NO;
+    bytes += n;
+    left -= (size_t)n;
+  }
+  return YES;
+}
+
+static void writerLoop(void) {
+  for (;;) {
+    os_unfair_lock_lock(&g_mailboxLock);
+    NSArray<NSString *> *shmLines = g_pendingShmLines.count > 0 ? [g_pendingShmLines copy] : nil;
+    [g_pendingShmLines removeAllObjects];
+    BOOL haveFrame = g_framePending;
+    uint32_t slot = g_pendingSlot;
+    uint64_t seq = g_pendingSeq;
+    g_framePending = NO;
+    if (shmLines == nil && !haveFrame) {
+      g_writing = NO;
+      os_unfair_lock_unlock(&g_mailboxLock);
+      return;
+    }
+    IOSurfaceID noteId = g_noteId;
+    NSUInteger noteSeed = g_noteSeed;
+    NSString *noteSource = g_noteSource;
+    os_unfair_lock_unlock(&g_mailboxLock);
+
+    NSMutableString *out = [NSMutableString string];
+    for (NSString *line in shmLines) [out appendString:line];
+    if (haveFrame) {
+      [out appendFormat:@"{\"t\":\"frame\",\"slot\":%u,\"seq\":%llu}\n", slot, (unsigned long long)seq];
+    }
+    const char *bytes = out.UTF8String;
+    if (!writeAllStdout(bytes, strlen(bytes))) {
+      requestStop(SIGPIPE); // reader gone (EPIPE): nobody to stream to
+      return;
+    }
+    if (haveFrame && g_verbose) {
+      emitNote([NSString stringWithFormat:@"emit seq=%llu slot=%u (%@ id=%u seed=%llu)",
+                (unsigned long long)seq, slot, noteSource, noteId,
+                (unsigned long long)noteSeed]);
+    }
+  }
+}
+
+static void kickWriterLocked(void) {
+  if (g_writing) return;
+  g_writing = YES;
+  dispatch_async(g_writerQueue, ^{ writerLoop(); });
+}
+
+// ─── shared-memory segments ─────────────────────────────────────────────────
+
+static void unlinkSegmentNamed(NSString *name) {
+  os_unfair_lock_lock(&g_mailboxLock);
+  BOOL linked = [g_linkedShmNames containsObject:name];
+  [g_linkedShmNames removeObject:name];
+  os_unfair_lock_unlock(&g_mailboxLock);
+  if (linked) shm_unlink(name.UTF8String);
+}
+
+static void unlinkAllSegments(void) {
+  os_unfair_lock_lock(&g_mailboxLock);
+  NSArray<NSString *> *names = [g_linkedShmNames copy];
+  [g_linkedShmNames removeAllObjects];
+  os_unfair_lock_unlock(&g_mailboxLock);
+  for (NSString *name in names) shm_unlink(name.UTF8String);
+}
+
+// Frame queue only. A failing shm call would otherwise note on every frame.
+static void noteShmFailure(NSString *what) {
+  static double lastAt = 0.0;
+  double now = CFAbsoluteTimeGetCurrent();
+  if (now - lastAt < 5.0) return;
+  lastAt = now;
+  emitNote(what);
+}
+
+// Frame queue only. Makes sure the current segment fits (outWidth, outHeight);
+// on a size change creates generation n+1, announces it, and retires the old one.
+static BOOL ensureSegment(NSUInteger outWidth, NSUInteger outHeight) {
+  if (g_shmBase != NULL && outWidth == g_shmWidth && outHeight == g_shmHeight) return YES;
+  // cap rounded up to 64 so every slot (and its seq word) stays 64-byte aligned.
+  uint64_t cap = ((uint64_t)outWidth * outHeight * 4 + 63) & ~(uint64_t)63;
+  size_t len = SHM_FILE_HEADER + SHM_SLOTS * (SHM_SLOT_HEADER + (size_t)cap);
+  unsigned gen = ++g_shmGen;
+  NSString *name = [NSString stringWithFormat:@"/sdf-%d-%u", getpid(), gen];
+  int fd = shm_open(name.UTF8String, O_RDWR | O_CREAT | O_EXCL, 0600);
+  if (fd < 0 && errno == EEXIST) {
+    // Left behind by a SIGKILLed process that had our pid.
+    shm_unlink(name.UTF8String);
+    fd = shm_open(name.UTF8String, O_RDWR | O_CREAT | O_EXCL, 0600);
+  }
+  if (fd < 0) {
+    noteShmFailure([NSString stringWithFormat:@"shm_open %@ failed: %s", name, strerror(errno)]);
+    return NO;
+  }
+  os_unfair_lock_lock(&g_mailboxLock);
+  [g_linkedShmNames addObject:name];
+  os_unfair_lock_unlock(&g_mailboxLock);
+  if (ftruncate(fd, (off_t)len) != 0) {
+    noteShmFailure([NSString stringWithFormat:@"ftruncate %@ (%zu bytes) failed: %s", name, len, strerror(errno)]);
+    close(fd);
+    unlinkSegmentNamed(name);
+    return NO;
+  }
+  void *p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  close(fd);
+  if (p == MAP_FAILED) {
+    noteShmFailure([NSString stringWithFormat:@"mmap %@ failed: %s", name, strerror(errno)]);
+    unlinkSegmentNamed(name);
+    return NO;
+  }
+  // ftruncate zero-fills: every slot starts at seq 0, which no frame line names.
+  uint8_t *base = (uint8_t *)p;
+  uint32_t fileHeader[4] = { SHM_MAGIC, SHM_VERSION, SHM_SLOTS, 0 };
+  memcpy(base, fileHeader, sizeof(fileHeader));
+  memcpy(base + 16, &cap, sizeof(cap));
+
+  // Retire the previous generation: the writer never touches it again, but a
+  // reader may still be opening it off an in-flight announcement — keep the
+  // name linked for 1 s.
+  if (g_shmBase != NULL) {
+    munmap(g_shmBase, g_shmLen);
+    NSString *old = g_shmName;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)NSEC_PER_SEC),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ unlinkSegmentNamed(old); });
+  }
+  g_shmBase = base;
+  g_shmLen = len;
+  g_shmCap = cap;
+  g_shmWidth = outWidth;
+  g_shmHeight = outHeight;
+  g_shmName = name;
+  emitNote([NSString stringWithFormat:@"shm %@: %lux%lu, %u slots, cap %llu",
+            name, (unsigned long)outWidth, (unsigned long)outHeight, SHM_SLOTS,
+            (unsigned long long)cap]);
+
+  os_unfair_lock_lock(&g_mailboxLock);
+  [g_pendingShmLines addObject:[NSString stringWithFormat:@"{\"t\":\"shm\",\"name\":\"%@\",\"slots\":%u,\"cap\":%llu}\n",
+                                name, SHM_SLOTS, (unsigned long long)cap]];
+  g_framePending = NO; // a pending line names the old generation's slot
+  kickWriterLocked();
+  os_unfair_lock_unlock(&g_mailboxLock);
+  return YES;
 }
 
 @interface FramePumper : NSObject
@@ -158,6 +356,7 @@ static void emitNote(NSString *line) {
 }
 
 - (void)handleFrameRendered {
+  if (g_stopping) return;
   // Strong local for the whole copy: the bridged ref below borrows from it.
   id surfaceObject = self.currentSurfaceId;
   if (surfaceObject == nil) return;
@@ -197,30 +396,32 @@ static void emitNote(NSString *line) {
     }
   }
 
-  // Compose the frame blob: FRM2 header + packed rows, direct into the
-  // outgoing buffer (no intermediate scratch — one pass per frame, zero
-  // allocations once the writer has returned its first buffers). With
-  // --scale N the pass is a vImage resample instead of a memcpy: a 3x iPhone
-  // frame is 12.6 MB, ~4x more than a 310pt pane can show.
+  // Compose straight into the next ring slot (no intermediate scratch — one
+  // pass per frame, zero allocations once the segment exists). With --scale N
+  // the pass is a downscale instead of a memcpy: a 3x iPhone frame is
+  // 12.6 MB, ~4x more than a 310pt pane can show.
   NSUInteger outWidth = g_scale > 1 ? width / g_scale : width;
   NSUInteger outHeight = g_scale > 1 ? height / g_scale : height;
   if (outWidth == 0 || outHeight == 0) return;
   NSUInteger packed = outWidth * 4 * outHeight;
-  NSUInteger frameLength = FRAME_HEADER + packed;
-  os_unfair_lock_lock(&g_mailboxLock);
-  NSMutableData *recycled = g_recycled;
-  g_recycled = nil;
-  os_unfair_lock_unlock(&g_mailboxLock);
-  NSMutableData *outgoing = recycled ?: [NSMutableData dataWithLength:frameLength];
-  if (outgoing.length != frameLength) outgoing.length = frameLength;
-  uint32_t header[6] = {
-    FFMAGIC_LE, (uint32_t)outWidth, (uint32_t)outHeight, 4, (uint32_t)width, (uint32_t)height,
+  if (!ensureSegment(outWidth, outHeight)) return;
+  uint64_t frameIndex = g_framesWritten++;
+  uint64_t seq = 2 * (frameIndex + 1); // even = complete; unique per frame
+  uint32_t slot = (uint32_t)(frameIndex % SHM_SLOTS);
+  uint8_t *slotBase = g_shmBase + SHM_FILE_HEADER + slot * (SHM_SLOT_HEADER + (size_t)g_shmCap);
+  _Atomic uint64_t *seqWord = (_Atomic uint64_t *)slotBase;
+  // Seqlock begin: odd seq, then a release fence so no header/pixel store
+  // below can become visible before the slot reads as "being written".
+  atomic_store_explicit(seqWord, seq - 1, memory_order_relaxed);
+  atomic_thread_fence(memory_order_release);
+  uint32_t slotHeader[5] = {
+    (uint32_t)outWidth, (uint32_t)outHeight, (uint32_t)width, (uint32_t)height, 4,
   };
-  memcpy(outgoing.mutableBytes, header, sizeof(header));
+  memcpy(slotBase + 8, slotHeader, sizeof(slotHeader));
 
   IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL);
   uint8_t *srcStart = (uint8_t *)IOSurfaceGetBaseAddress(surface);
-  uint8_t *dstStart = (uint8_t *)outgoing.mutableBytes + FRAME_HEADER;
+  uint8_t *dstStart = slotBase + SHM_SLOT_HEADER;
   if (g_scale == 2) {
     downscale2xBGRA(srcStart, stride, dstStart, outWidth, outHeight);
   } else if (outWidth != width) {
@@ -245,69 +446,20 @@ static void emitNote(NSString *line) {
     }
   }
   IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+  // Seqlock end: the even value publishes header + pixels.
+  atomic_store_explicit(seqWord, seq, memory_order_release);
 
-  // Single-consumer mailbox. The callback may NEVER block on the consumer:
-  // the render server that delivers these callbacks blocks in turn (see the
-  // RE notes), so fwrite lives on the writer queue. While a write is in
-  // flight, a new callback just overwrites the slot — latest state wins and
-  // superseded frames are dropped inside the process.
-  // Snapshot surface identity for the writer's emit note (the surface may
-  // advance while the writer blocks, so the note reflects compose-time state).
-  IOSurfaceID noteId = surfaceId;
-  NSUInteger noteSeed = seed;
-  NSString *noteSource = g_currentEmitSource ?: @"bind";
-
+  // Hand the notification to the writer queue (see writerLoop), with the
+  // compose-time surface identity for the verbose emit note.
   os_unfair_lock_lock(&g_mailboxLock);
-  g_noteId = noteId;
-  g_noteSeed = noteSeed;
-  g_noteSource = noteSource;
-  g_slot = outgoing;
-  BOOL startWriter = !g_writing;
-  if (startWriter) g_writing = YES;
+  g_noteId = surfaceId;
+  g_noteSeed = seed;
+  g_noteSource = g_currentEmitSource ?: @"bind";
+  g_pendingSlot = slot;
+  g_pendingSeq = seq;
+  g_framePending = YES;
+  kickWriterLocked();
   os_unfair_lock_unlock(&g_mailboxLock);
-
-  if (startWriter) {
-    dispatch_async(g_writerQueue, ^{
-      for (;;) {
-        os_unfair_lock_lock(&g_mailboxLock);
-        NSMutableData *frame = g_slot;
-        if (frame == nil) {
-          g_writing = NO;
-          os_unfair_lock_unlock(&g_mailboxLock);
-          break;
-        }
-        g_slot = nil;
-        IOSurfaceID noteId = g_noteId;
-        NSUInteger noteSeed = g_noteSeed;
-        NSString *noteSource = g_noteSource;
-        os_unfair_lock_unlock(&g_mailboxLock);
-        // Raw write(2), not stdio: a writer blocked in fwrite holds stdout's
-        // FILE lock, and exit()'s flush then deadlocks on it — SIGINT left
-        // simframe hung forever whenever the reader had stopped draining.
-        const uint8_t *bytes = frame.bytes;
-        size_t left = frame.length;
-        while (left > 0) {
-          ssize_t n = write(STDOUT_FILENO, bytes, left);
-          if (n < 0 && errno == EINTR) continue;
-          if (n <= 0) _exit(0); // reader gone (EPIPE): nobody to stream to
-          bytes += n;
-          left -= (size_t)n;
-        }
-        static NSUInteger emitted = 0;
-        ++emitted;
-        if (g_verbose) {
-          emitNote([NSString stringWithFormat:@"emit #%lu (%@ id=%u seed=%llu)",
-                    (unsigned long)emitted, noteSource, noteId,
-                    (unsigned long long)noteSeed]);
-        }
-        // Recycle only after the write completed — a callback may already be
-        // composing into a recycled buffer while this write finishes.
-        os_unfair_lock_lock(&g_mailboxLock);
-        g_recycled = frame;
-        os_unfair_lock_unlock(&g_mailboxLock);
-      }
-    });
-  }
 }
 
 - (void)shutdownUserWarning {
@@ -672,13 +824,16 @@ static void requestStop(int signalNumber) {
   @autoreleasepool {
     // Hop onto the frame queue so teardown never races a poll tick or callback.
     dispatch_sync(g_frameQueue, ^{
+      g_stopping = YES;
       if (g_pollSource != nil) {
         dispatch_source_cancel(g_pollSource);
         g_pollSource = nil;
       }
       unregisterCallbacks();
+      unlinkAllSegments();
     });
-    emitNote(@"stopping on signal");
+    if (signalNumber == 0) emitNote(@"stopping on stdin EOF");
+    else emitNote([NSString stringWithFormat:@"stopping on signal %d", signalNumber]);
     // _exit: skip stdio teardown — the writer thread may still be parked in a
     // write to a pipe nobody drains, and nothing buffered is worth flushing.
     _exit(0);
@@ -689,7 +844,7 @@ int main(int argc, char * argv[]) {
   @autoreleasepool {
     NSArray<NSString *> *args = [[NSProcessInfo processInfo] arguments];
     if (args.count < 2) {
-      fprintf(stderr, "usage: simframe <udid> [--fps N] [--scale N] [--verbose]\n");
+      fprintf(stderr, "usage: sdframe <udid> [--fps N] [--scale N] [--verbose]\n");
       return 2;
     }
     NSString *udid = args[1];
@@ -770,10 +925,12 @@ int main(int argc, char * argv[]) {
     g_pumper.minInterval = 1.0 / maxFps;
 
     g_frameQueue = dispatch_queue_create(
-        "pipmini.simframe.frames",
+        "simdriver.sdframe.frames",
         dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
     dispatch_queue_set_specific(g_frameQueue, g_frameQueueKey, g_frameQueueKey, NULL);
-    g_writerQueue = dispatch_queue_create("pipmini.simframe.writer", DISPATCH_QUEUE_SERIAL);
+    g_writerQueue = dispatch_queue_create("simdriver.sdframe.writer", DISPATCH_QUEUE_SERIAL);
+    g_pendingShmLines = [NSMutableArray array];
+    g_linkedShmNames = [NSMutableArray array];
     dispatch_set_target_queue(g_writerQueue, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
 
     // Meta's discovery flow (FramebufferSurfaceLocator.surface): the io port
@@ -911,6 +1068,16 @@ int main(int argc, char * argv[]) {
     dispatch_resume(sigInt);
     signal(SIGINT, SIG_IGN);
     signal(SIGPIPE, SIG_IGN); // a closed reader surfaces as EPIPE in the writer
+
+    // stdin EOF = the owner closed our pipe (or died): stop. Input is ignored.
+    dispatch_source_t stdinSource = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_READ, STDIN_FILENO, 0, dispatch_get_main_queue());
+    dispatch_source_set_event_handler(stdinSource, ^{
+      char sink[256];
+      ssize_t n = read(STDIN_FILENO, sink, sizeof(sink));
+      if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN)) requestStop(0);
+    });
+    dispatch_resume(stdinSource);
 
     // Parent watch: if the app dies without signalling us (crash, hot-reload
     // churn, SIGKILL), stop instead of pumping frames into nobody.
