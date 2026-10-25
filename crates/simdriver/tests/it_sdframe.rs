@@ -93,10 +93,10 @@ fn it_sdframe_60fps() {
     let mut warm: Vec<Instant> = Vec::new();
     let mut times: Vec<Instant> = Vec::new();
     let mut torn = 0usize;
-    let mut window_end: Option<Instant> = None;
+    let mut window: Option<(Instant, Instant)> = None;
     loop {
         let now = Instant::now();
-        let deadline = window_end.unwrap_or(started + Duration::from_secs(40));
+        let deadline = window.map_or(started + Duration::from_secs(40), |(_, end)| end);
         if now >= deadline {
             break;
         }
@@ -111,7 +111,7 @@ fn it_sdframe_60fps() {
                     assert_eq!((w, h), (603, 1311), "iPhone 18 Pro at --scale 2");
                 }
                 assert_eq!((w, h), (sw / 2, sh / 2), "--scale 2 halves the source");
-                if window_end.is_some() {
+                if window.is_some() {
                     times.push(at);
                     continue;
                 }
@@ -119,7 +119,7 @@ fn it_sdframe_60fps() {
                 warm.retain(|t| at.duration_since(*t) <= Duration::from_millis(500));
                 if warm.len() >= 25 {
                     eprintln!("stream live after {:.1} s; measuring 5 s", started.elapsed().as_secs_f64());
-                    window_end = Some(at + Duration::from_secs(5));
+                    window = Some((at, at + Duration::from_secs(5)));
                     times.push(at);
                 }
             }
@@ -128,14 +128,12 @@ fn it_sdframe_60fps() {
             Err(mpsc::RecvTimeoutError::Disconnected) => panic!("sdframe stdout closed early"),
         }
     }
-    assert!(window_end.is_some(), "frame stream never reached a live rate within 40 s (page not animating?)");
-
-    let stats = FrameStats::from_times(&times);
+    let (start, end) = window.expect("frame stream never reached a live rate within 40 s (page not animating?)");
+    // The loop runs until `end` even if frames stop, so a stall shows up as the trailing gap.
+    let stats = FrameStats::over_window(&times, start, end);
     eprintln!("sdframe stats: {stats:?}, torn/overwritten reads: {torn}, segments: {names:?}");
     assert!(!names.is_empty(), "no shm announced");
-    assert!(stats.frames > 0, "no frames received");
-    assert!(stats.fps >= 55.0, "fps {:.1} < 55", stats.fps);
-    assert!(stats.p99_gap_ms <= 34.0, "p99 gap {:.1} ms > 34", stats.p99_gap_ms);
+    stats.assert_live_60();
 
     // Closing stdin must stop the helper within 1 s and unlink every segment.
     drop(child.0.stdin.take());
@@ -151,4 +149,28 @@ fn it_sdframe_60fps() {
     for (name, cap) in &names {
         assert!(ShmReader::open(name, 3, *cap).is_err(), "{name} still opens after exit");
     }
+}
+
+/// FrameStats must not hide a stall: frames that stop partway through the window fail the bar.
+#[test]
+fn frame_stats_counts_a_trailing_stall() {
+    let start = Instant::now();
+    let end = start + Duration::from_secs(5);
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    let steady: Vec<Instant> = (0..300).map(|i| at(i * 50 / 3)).collect(); // 60 fps for 5 s
+    let ok = FrameStats::over_window(&steady, start, end);
+    assert!(ok.fps >= 59.0 && ok.p99_gap_ms <= 17.0 && ok.max_gap_ms <= 17.0, "{ok:?}");
+    ok.assert_live_60();
+
+    let stalled: Vec<Instant> = steady.iter().copied().filter(|t| *t < at(2000)).collect();
+    let s = FrameStats::over_window(&stalled, start, end);
+    assert!(s.fps < 30.0, "fps must count the whole window: {s:?}");
+    assert!(s.max_gap_ms >= 2900.0, "trailing gap must be included: {s:?}");
+    assert!(std::panic::catch_unwind(|| s.assert_live_60()).is_err());
+
+    // A single 300 ms hiccup mid-window: fps and p99 still look fine, the max-gap bound catches it.
+    let hiccup: Vec<Instant> = steady.iter().copied().filter(|t| *t < at(2500) || *t >= at(2800)).collect();
+    let h = FrameStats::over_window(&hiccup, start, end);
+    assert!(h.fps >= 55.0 && h.p99_gap_ms <= 34.0, "{h:?}");
+    assert!(std::panic::catch_unwind(|| h.assert_live_60()).is_err());
 }

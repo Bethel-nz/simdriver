@@ -102,30 +102,82 @@ pub fn open_page(udid: &str, fixture: &str) -> Server {
     Server { port, stop, thread: Some(thread) }
 }
 
-/// Delivery statistics over a run of frame arrival times.
+/// Delivery statistics for frames that arrived during a measurement window.
 #[derive(Debug, Clone, Copy)]
 pub struct FrameStats {
+    /// Frames that arrived inside the window.
     pub frames: usize,
+    /// `frames` over the window's full length, so a stall anywhere (even at the end) counts.
     pub fps: f64,
     pub p50_gap_ms: f64,
     pub p99_gap_ms: f64,
+    pub max_gap_ms: f64,
+    /// Gaps longer than `SLOW_GAP_MS`, and how many gaps there were in total.
+    pub slow_gaps: usize,
+    pub gaps: usize,
 }
 
+/// Two display periods at 60 Hz: a gap longer than this is a visibly dropped frame.
+pub const SLOW_GAP_MS: f64 = 34.0;
+
 impl FrameStats {
-    pub fn from_times(times: &[Instant]) -> FrameStats {
-        if times.len() < 2 {
-            return FrameStats { frames: times.len(), fps: 0.0, p50_gap_ms: 0.0, p99_gap_ms: 0.0 };
+    /// Stats over `[start, end]`. Gaps include window start -> first frame and
+    /// last frame -> window end, so frames that stop early show up as one long gap.
+    /// Times outside the window are ignored.
+    pub fn over_window(times: &[Instant], start: Instant, end: Instant) -> FrameStats {
+        assert!(end > start, "empty measurement window");
+        let inside: Vec<Instant> = times.iter().copied().filter(|t| *t >= start && *t <= end).collect();
+        // A frame sitting exactly on a window edge is that edge (no zero-length gap).
+        let mut edges = Vec::with_capacity(inside.len() + 2);
+        if inside.first() != Some(&start) {
+            edges.push(start);
         }
-        let span = times[times.len() - 1].duration_since(times[0]).as_secs_f64();
+        edges.extend(inside.iter().copied());
+        if inside.last() != Some(&end) {
+            edges.push(end);
+        }
         let mut gaps: Vec<f64> =
-            times.windows(2).map(|w| w[1].duration_since(w[0]).as_secs_f64() * 1000.0).collect();
+            edges.windows(2).map(|w| w[1].duration_since(w[0]).as_secs_f64() * 1000.0).collect();
         gaps.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let pct = |p: f64| gaps[(((gaps.len() - 1) as f64) * p).round() as usize];
         FrameStats {
-            frames: times.len(),
-            fps: (times.len() - 1) as f64 / span,
+            frames: inside.len(),
+            fps: inside.len() as f64 / end.duration_since(start).as_secs_f64(),
             p50_gap_ms: pct(0.50),
             p99_gap_ms: pct(0.99),
+            max_gap_ms: gaps[gaps.len() - 1],
+            slow_gaps: gaps.iter().filter(|g| **g > SLOW_GAP_MS).count(),
+            gaps: gaps.len(),
         }
+    }
+
+    /// Stats over the span from the first to the last arrival (no window edges known).
+    pub fn from_times(times: &[Instant]) -> FrameStats {
+        match (times.first(), times.last()) {
+            (Some(&a), Some(&b)) if b > a => FrameStats::over_window(times, a, b),
+            _ => FrameStats {
+                frames: times.len(),
+                fps: 0.0,
+                p50_gap_ms: 0.0,
+                p99_gap_ms: 0.0,
+                max_gap_ms: 0.0,
+                slow_gaps: 0,
+                gaps: 0,
+            },
+        }
+    }
+
+    /// The delivery bar every live-frame test uses: >= 55 fps, p99 gap <= 34 ms,
+    /// at most 1% of gaps over 34 ms, and no single gap over 100 ms.
+    pub fn assert_live_60(&self) {
+        assert!(self.fps >= 55.0, "fps {:.1} < 55 ({self:?})", self.fps);
+        assert!(self.p99_gap_ms <= SLOW_GAP_MS, "p99 gap {:.1} ms > 34 ({self:?})", self.p99_gap_ms);
+        assert!(
+            self.slow_gaps * 100 <= self.gaps,
+            "{} of {} gaps > 34 ms (> 1%) ({self:?})",
+            self.slow_gaps,
+            self.gaps
+        );
+        assert!(self.max_gap_ms <= 100.0, "max gap {:.1} ms > 100 ({self:?})", self.max_gap_ms);
     }
 }
