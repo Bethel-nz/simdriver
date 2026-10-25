@@ -8,6 +8,9 @@ pub fn baked_helper_dir() -> &'static Path {
 mod devices;
 mod driver;
 mod error;
+// Public only so cbindgen can scan it (include/simdriver.h); not part of the Rust API.
+#[doc(hidden)]
+pub mod ffi;
 mod frames;
 mod gesture;
 mod helper;
