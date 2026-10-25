@@ -1070,7 +1070,8 @@ mod tests {
         // came up — an unsupported Xcode) still fails it.
         let rig = Rig::new("hidfail1", false);
         let log = Log::default();
-        let hid = (fake_helper(), vec!["fail".into(), "1".into(), "dtuhidd did not come up".into()]);
+        // sdhid fails 300 ms in, well after the fake sdframe's first frame.
+        let hid = (fake_helper(), vec!["fail".into(), "1".into(), "dtuhidd did not come up".into(), "300".into()]);
         let l = log.clone();
         let r = Driver::start_with("fake-hidfail1".into(), rig.frame.clone(), hid, Box::new(move |e| l.push(e)), W);
         assert!(matches!(&r, Err(Error::Spawn(m)) if m == "dtuhidd did not come up"), "{:?}", r.err());

@@ -11,7 +11,7 @@
 //!                      `{"t":"_exit","code":N}` prints "fake_helper: exiting N" on stderr and
 //!                      exits with N. Exit 0 on stdin EOF.
 //!   lines <code> <l>…  print each argument as a line, then exit with <code>.
-//!   fail <code> <msg>  print <msg> on stderr, then exit with <code>.
+//!   fail <code> <msg> [ms]  print <msg> on stderr, then exit with <code> (after <ms>).
 //!   frames <name> <slots> <cap>
 //!                      sdframe stand-in over a segment the test created and filled (seqs 2,
 //!                      4, 6 in slots 0, 1, 2): prints the `shm` line, then announces those
@@ -37,6 +37,9 @@ fn main() {
             std::process::exit(code);
         }
         Some("fail") => {
+            if let Some(ms) = args.get(3) {
+                std::thread::sleep(Duration::from_millis(ms.parse().unwrap()));
+            }
             eprintln!("{}", args[2]);
             std::process::exit(args[1].parse().unwrap());
         }
