@@ -89,6 +89,12 @@ impl CallbackGate {
         true
     }
 
+    /// True if the calling thread is inside a callback of this gate.
+    pub(crate) fn running_here(&self) -> bool {
+        let me = thread::current().id();
+        lock(&self.st).active.contains(&me)
+    }
+
     /// Close and wait for callbacks running on other threads. Idempotent.
     pub(crate) fn close(&self) {
         let me = thread::current().id();
@@ -252,16 +258,15 @@ impl Supervised {
         self.pid
     }
 
-    /// Write one line (newline appended). Silently a no-op once stdin is closed or the
-    /// helper is gone.
-    pub fn send_line(&self, line: &str) {
+    /// Write one line (newline appended). False (and nothing else happens) once stdin is
+    /// closed or the helper is gone.
+    pub fn send_line(&self, line: &str) -> bool {
         let mut guard = lock(&self.stdin);
-        if let Some(w) = guard.as_mut() {
-            let mut buf = Vec::with_capacity(line.len() + 1);
-            buf.extend_from_slice(line.as_bytes());
-            buf.push(b'\n');
-            let _ = w.write_all(&buf);
-        }
+        let Some(w) = guard.as_mut() else { return false };
+        let mut buf = Vec::with_capacity(line.len() + 1);
+        buf.extend_from_slice(line.as_bytes());
+        buf.push(b'\n');
+        w.write_all(&buf).is_ok()
     }
 
     /// Close our end of the helper's stdin (the helper then exits on EOF).
@@ -508,7 +513,12 @@ mod tests {
         assert!(!gate.run(|| panic!("ran after close")));
         // Closing from inside a callback does not wait for itself.
         let gate = CallbackGate::new();
-        assert!(gate.run(|| gate.close()));
+        assert!(!gate.running_here());
+        assert!(gate.run(|| {
+            assert!(gate.running_here());
+            gate.close()
+        }));
+        assert!(!gate.running_here());
     }
 
     #[test]

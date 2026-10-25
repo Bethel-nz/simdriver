@@ -6,20 +6,18 @@ pub fn baked_helper_dir() -> &'static Path {
 }
 
 mod devices;
+mod driver;
 mod error;
 mod frames;
-// Consumed by the driver (Task 9); unused until then.
-#[allow(dead_code)]
 mod gesture;
 mod helper;
 mod hid;
 mod protocol;
 mod shm;
-// Consumed by the driver (Task 9); unused until then.
-#[allow(dead_code)]
 mod stats;
 
 pub use devices::{boot, list_devices, shutdown, Device, DeviceSelector};
+pub use driver::{Button, Driver, Event, Modifiers, Options, State};
 pub use error::Error;
 pub use gesture::ScrollPhase;
 pub use protocol::Phase;

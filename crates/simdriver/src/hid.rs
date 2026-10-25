@@ -87,11 +87,16 @@ struct State {
 }
 
 impl State {
-    /// Write the queue to the helper if it is ready and present.
+    /// Write the queue to the helper if it is ready and present. A failed write means the
+    /// helper died (its `Exited` is on the way): stop there, keep the rest queued.
     fn flush(&mut self) {
         if let (true, Some(h)) = (self.ready, self.helper.as_ref()) {
-            for cmd in self.queue.drain() {
-                h.send_line(&cmd.to_line());
+            while let Some(cmd) = self.queue.q.front() {
+                if !h.send_line(&cmd.to_line()) {
+                    self.ready = false;
+                    return;
+                }
+                self.queue.q.pop_front();
             }
         }
     }
@@ -193,25 +198,28 @@ impl HidClient {
         Ok(client)
     }
 
-    /// Send now if the helper is ready, else queue (see [`Queue`]). Ignored after `stop`.
+    /// Send now if the helper is ready, else queue (see [`Queue`]). A write that fails
+    /// (the helper died, `Exited` not yet handled) queues the command for the next helper.
+    /// Ignored after `stop`.
     pub fn send(&self, cmd: HidCmd) {
         let mut st = lock(&self.shared.state);
         if st.stopped {
             return;
         }
-        match (st.ready, st.helper.as_ref()) {
-            (true, Some(h)) => h.send_line(&cmd.to_line()),
-            _ => {
-                st.queue.push(cmd);
+        if let (true, Some(h)) = (st.ready, st.helper.as_ref()) {
+            if h.send_line(&cmd.to_line()) {
+                return;
             }
+            st.ready = false;
         }
+        st.queue.push(cmd);
     }
 
     /// Write a raw line to the current helper, bypassing the queue (e.g. sdhid's test-only
     /// `{"t":"_invalidate"}`). Dropped if there is no helper.
     pub fn send_raw_line(&self, line: &str) {
         if let Some(h) = lock(&self.shared.state).helper.as_ref() {
-            h.send_line(line);
+            let _ = h.send_line(line);
         }
     }
 

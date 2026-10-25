@@ -42,6 +42,17 @@ pub fn booted_udid() -> Option<String> {
     panic!("SIMDRIVER_IT=1 but no simulator is booted");
 }
 
+/// False (with a skip note) while the owner's pip-mini streams `udid`: no scripted input on
+/// a simulator someone is using. Its helpers are `simframe <udid> …` / `simhid <udid>`.
+pub fn input_allowed(udid: &str) -> bool {
+    let pattern = format!("/(simframe|simhid) {udid}");
+    let busy = Command::new("pgrep").args(["-f", &pattern]).output().is_ok_and(|o| o.status.success());
+    if busy {
+        eprintln!("skipping: pip-mini is live on {udid} (no scripted input); use SIMDRIVER_TEST_UDID");
+    }
+    !busy
+}
+
 pub fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
 }
@@ -60,6 +71,16 @@ impl Drop for Server {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+    }
+}
+
+impl Server {
+    /// The page's URL. Names 127.0.0.1, not `localhost`: Safari tries `::1` first, and
+    /// std's bind sets SO_REUSEADDR, so our 127.0.0.1 bind succeeds even while another
+    /// server (a stray `python -m http.server`) holds `[::]` on the same port — and
+    /// `localhost` would load that server's page instead of the fixture.
+    pub fn url(&self) -> String {
+        format!("http://127.0.0.1:{}/", self.port)
     }
 }
 
@@ -82,23 +103,60 @@ pub fn open_page(udid: &str, fixture: &str) -> Server {
                 break;
             }
             let Ok(mut s) = conn else { continue };
-            let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
-            let mut buf = [0u8; 4096];
-            let _ = s.read(&mut buf);
-            let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            let _ = s.write_all(head.as_bytes());
-            let _ = s.write_all(&body);
+            // One thread per connection: Safari opens speculative connections it never
+            // writes to, and a serial loop would park its full read timeout behind each.
+            let body = body.clone();
+            std::thread::spawn(move || {
+                let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = s.write_all(head.as_bytes());
+                let _ = s.write_all(&body);
+            });
         }
     });
-    let url = format!("http://localhost:{port}/");
-    let st = Command::new("xcrun")
-        .args(["simctl", "openurl", udid, &url])
-        .status()
-        .expect("run simctl openurl");
-    assert!(st.success(), "simctl openurl {url} failed");
+    let url = format!("http://127.0.0.1:{port}/"); // see `Server::url`
+    // Once per test process, start from a cold Safari: it keeps every tab this sim ever
+    // opened (someone's manual browsing, a previous run's page with a lost touchend),
+    // and a warm open can land on restored state
+    // instead of the fixture. Killing it per test would re-spawn Safari's whole guest
+    // process tree every time — visible as host load.
+    static COLD_ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    let cold = COLD_ONCE.set(()).is_ok();
+    if cold {
+        let _ =
+            Command::new("xcrun").args(["simctl", "terminate", udid, "com.apple.mobilesafari"]).status();
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    let opened = |args: &Vec<String>| {
+        Command::new("xcrun").args(args).status().is_ok_and(|st| st.success())
+    };
+    let launch_with_url = || {
+        opened(&vec![
+            "simctl".into(),
+            "launch".into(),
+            udid.into(),
+            "com.apple.mobilesafari".into(),
+            url.clone(),
+        ])
+    };
+    let st = if cold {
+        // After the kill, openurl would relaunch Safari and let it restore its old
+        // tabs, sometimes foregrounding one seconds later; launching with the URL
+        // argument puts the fixture in front and keeps it there.
+        launch_with_url()
+    } else {
+        // Warm: re-opening the stable-port URL reuses its tab.
+        opened(&vec!["simctl".into(), "openurl".into(), udid.into(), url.clone()]) || launch_with_url()
+        // (launch is also the fallback when openurl's LaunchServices channel has wedged
+        // for good after enough reboots — ETIMEDOUT forever — which launch is immune to.)
+    };
+    assert!(st, "could not open {url} on {udid}");
     Server { port, stop, thread: Some(thread) }
 }
 

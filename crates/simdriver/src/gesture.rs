@@ -54,6 +54,8 @@ struct Touch {
     buffered: Vec<(f64, f64)>,
     pinch_pan: bool,
     pinch_last: Option<[f64; 4]>,
+    /// Latest pointer position (clamped).
+    last: (f64, f64),
 }
 
 #[derive(Debug)]
@@ -167,9 +169,19 @@ impl Router {
 
     /// `pinch`: Option held, the drag becomes two fingers; `pan` (Shift too) moves
     /// them together instead of spreading them.
-    pub(crate) fn down(&mut self, x: f64, y: f64, pinch: bool, pan: bool, _now: Duration) -> Vec<HidCmd> {
+    pub(crate) fn down(&mut self, x: f64, y: f64, pinch: bool, pan: bool, now: Duration) -> Vec<HidCmd> {
         let mut out = Vec::new();
         self.lift_pan(&mut out); // a click ends any trackpad pan in flight
+        // A down without an up (the host lost one): lift the finger first. A held edge
+        // touch never reached the device, so it is simply dropped.
+        if let Some(t) = &self.touch {
+            if t.state == State::Pending {
+                self.touch = None;
+            } else {
+                let (lx, ly) = t.last;
+                out.extend(self.up(lx, ly, now));
+            }
+        }
         let (x, y) = (self.cx(x), self.cy(y));
         let edge = if pinch { Edge::None } else { self.edge_at(x, y) };
         let state = if pinch {
@@ -187,6 +199,7 @@ impl Router {
             buffered: Vec::new(),
             pinch_pan: pan,
             pinch_last: None,
+            last: (x, y),
         };
         match state {
             State::Stream => out.push(touch(Phase::Down, x, y, Edge::None)),
@@ -205,6 +218,7 @@ impl Router {
         let (x, y) = (self.cx(x), self.cy(y));
         let mut out = Vec::new();
         let Some(mut t) = self.touch.take() else { return out };
+        t.last = (x, y);
         match t.state {
             State::Stream => out.push(touch(Phase::Move, x, y, Edge::None)),
             State::Pinch => {
@@ -454,6 +468,28 @@ mod tests {
         assert!(r.scroll(200.0, 400.0, 0.0, 0.0, ScrollPhase::Began, T0).is_empty());
         assert!(r.scroll(200.0, 400.0, 5.0, 5.0, ScrollPhase::Changed, T0).is_empty());
         assert!(r.tick(ms(1000)).is_empty());
+    }
+
+    #[test]
+    fn down_without_up_lifts_the_touch_in_flight() {
+        let mut r = r();
+        r.down(200.0, 400.0, false, false, T0);
+        r.move_to(210.0, 410.0, T0);
+        assert_eq!(
+            r.down(100.0, 100.0, false, false, T0),
+            vec![t(Phase::Up, 210.0, 410.0, Edge::None), t(Phase::Down, 100.0, 100.0, Edge::None)]
+        );
+        // A pinch in flight lifts both fingers where they were.
+        r.up(100.0, 100.0, T0);
+        r.down(200.0, 400.0, true, false, T0);
+        assert_eq!(
+            r.down(100.0, 100.0, false, false, T0),
+            vec![t2(Phase::Up, 150.0, 400.0, 250.0, 400.0), t(Phase::Down, 100.0, 100.0, Edge::None)]
+        );
+        // A held edge touch never reached the device: dropped, nothing to lift.
+        r.up(100.0, 100.0, T0);
+        assert!(r.down(200.0, 860.0, false, false, T0).is_empty());
+        assert_eq!(r.down(100.0, 100.0, false, false, T0), vec![t(Phase::Down, 100.0, 100.0, Edge::None)]);
     }
 
     #[test]

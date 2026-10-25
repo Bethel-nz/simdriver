@@ -30,7 +30,13 @@
  * ALL HID — touches, buttons, keys, text — but does not fight for the service:
  * when displaced it prints {"t":"displaced"} once, drops every command except a
  * gesture start (touch/touch2 down, button, key, text), and on the next gesture
- * start reconnects, prints {"t":"reclaimed"} and sends that command.
+ * start reconnects, prints {"t":"reclaimed"} and sends that command. A reclaim gets
+ * a short liveness budget (3 × 1 s, 250 ms apart); if it fails, simhid prints
+ * {"t":"error"} and stays displaced, so the next gesture start tries again.
+ *
+ * When the device leaves Booted (shutdown, reboot) simhid exits 5: its
+ * connection would otherwise be dead for good (dtuhidd only reports it
+ * "interrupted"), and the owner restarts it once the device is back.
  *
  * stdin, one JSON object per line (device points):
  *   {"t":"touch","p":"down|move|up","x":..,"y":..,"e":0-4}
@@ -41,7 +47,12 @@
  *   {"t":"_invalidate"}                TEST ONLY: cancel the connection and take the same
  *                                      path as XPC_ERROR_CONNECTION_INVALID (displaced)
  * stdout, one JSON object per line:
- *   {"t":"ready","w":pt,"h":pt} · {"t":"displaced"} · {"t":"reclaimed"} · {"t":"warn","detail":..} · {"t":"error","detail":..} (then exit 1)
+ *   {"t":"ready","w":pt,"h":pt} · {"t":"displaced"} · {"t":"reclaimed"} · {"t":"warn","detail":..}
+ *   {"t":"error","detail":..}   then exit (see below), except after a failed reclaim
+ *
+ * Exit codes: 0 stdin EOF / parent gone · 1 dtuhidd never came up · 2 usage ·
+ * 3 CoreSimulator / device not found / not booted · 4 no main screen size ·
+ * 5 the device left Booted while running.
  *
  * Usage: simhid <udid>
  */
@@ -52,6 +63,7 @@
 #import <xpc/xpc.h>
 #import <dlfcn.h>
 #import <signal.h>
+#import <stdatomic.h>
 #import <unistd.h>
 
 #import "CoreSimulator/SimDeviceSet.h"
@@ -62,9 +74,15 @@ static NSString *const kDigitizerService = @"com.apple.coredevice.feature.remote
 
 // Liveness, from Meta's DTUHIDTiming: the first send demand-launches dtuhidd,
 // and a daemon launchd has throttled still vends a port that swallows sends.
-static const int64_t kLivenessTimeoutSec = 4;
+static const int64_t kLivenessTimeoutMs = 4000;
 static const int kLivenessAttempts = 5;
 static const useconds_t kLivenessBackoffUs = 4 * 1000 * 1000;
+// Reclaiming after displacement: the user is waiting on a touch, and the daemon is
+// already up, so retry fast and give up soon (the next gesture start tries again).
+static const int64_t kReclaimTimeoutMs = 1000;
+static const int kReclaimAttempts = 3;
+static const useconds_t kReclaimBackoffUs = 250 * 1000;
+static const int64_t kDeviceWatchMs = 500;
 static const useconds_t kReplyTailUs = 200 * 1000;
 static const useconds_t kButtonHoldUs = 60 * 1000;
 static const useconds_t kButtonGapUs = 120 * 1000; // inside iOS's double-click window
@@ -80,13 +98,15 @@ static SimDevice *g_device = nil;
 static double g_widthPt = 0, g_heightPt = 0;
 static xpc_connection_t g_conn = NULL;
 static volatile BOOL g_invalid = YES;
-// Set from the connection event handler (xpc queue) when another client took the
-// service over; cleared on the input queue when a gesture start reclaims it.
-static volatile BOOL g_displaced = NO;
+// Set from the connection event handler (xpc queue) or the test-only `_invalidate`
+// (input queue) when another client took the service over; cleared on the input queue
+// when a gesture start reclaims it. Atomic so one invalidation reports exactly once.
+static _Atomic bool g_displaced = false;
 // Every send happens on this serial queue, so contact phases stay ordered and
 // button holds / key gaps can simply sleep it.
 static dispatch_queue_t g_inputQueue = nil;
 static dispatch_queue_t g_xpcQueue = nil;
+static dispatch_source_t g_deviceWatch = nil;
 static BOOL g_touchActive = NO;
 static BOOL g_touch2Active = NO;
 
@@ -104,10 +124,12 @@ static void emit(NSDictionary *obj) {
 
 static void warn(NSString *detail) { emit(@{ @"t" : @"warn", @"detail" : detail }); }
 
-static void fail(NSString *detail) {
+static void failWith(int code, NSString *detail) {
   emit(@{ @"t" : @"error", @"detail" : detail });
-  _exit(1);
+  _exit(code);
 }
+
+static void fail(NSString *detail) { failWith(3, detail); }
 
 // ─── device ──────────────────────────────────────────────────────────────────
 
@@ -142,6 +164,23 @@ static SimDevice *findDevice(NSString *udid) {
   return nil;
 }
 
+/// Wait for CoreSimulator's bootstatus ("fully booted") before the first connect.
+/// dtuhidd answers its liveness barrier while the guest is still coming up — right after
+/// a shutdown+boot — so a connect then yields a Ready helper whose digitizer events iOS
+/// silently drops (observed in the reboot IT). On a device that is already fully up this
+/// returns immediately. Best effort: `xcrun` unavailable counts as done.
+static BOOL waitBootstatus(NSString *udid) {
+  NSString *dev = currentDeveloperDir();
+  if (dev.length == 0) return YES;
+  FILE *pipe = popen(
+      [[NSString stringWithFormat:@"'%@/usr/bin/simctl' bootstatus -b '%@' 2>/dev/null", dev, udid] UTF8String],
+      "r");
+  if (pipe == NULL) return YES;
+  char line[256];
+  while (fgets(line, sizeof line, pipe) != NULL) {}
+  return pclose(pipe) == 0;
+}
+
 // ─── XPC connection to dtuhidd ───────────────────────────────────────────────
 
 static xpc_object_t message(const char *type, xpc_object_t payload, bool barrier) {
@@ -164,10 +203,7 @@ static xpc_object_t keyboardPayload(uint64_t usage, uint64_t state) {
 /// XPC_ERROR_CONNECTION_INVALID handler and the test-only `_invalidate` command.
 static void markDisplaced(void) {
   g_invalid = YES;
-  if (!g_displaced) {
-    g_displaced = YES;
-    emit(@{ @"t" : @"displaced" });
-  }
+  if (!atomic_exchange(&g_displaced, true)) emit(@{ @"t" : @"displaced" });
 }
 
 static xpc_connection_t openConnection(NSString **why) {
@@ -207,7 +243,7 @@ static xpc_connection_t openConnection(NSString **why) {
 }
 
 /// A keyboard usage 0 barrier — "no event" — answered only by a live daemon.
-static BOOL confirmLiveness(xpc_connection_t conn) {
+static BOOL confirmLiveness(xpc_connection_t conn, int64_t timeoutMs) {
   dispatch_semaphore_t done = dispatch_semaphore_create(0);
   __block BOOL ok = NO;
   xpc_connection_send_message_with_reply(conn, message("IndigoKeyboardButtonEvent", keyboardPayload(0, 2), true),
@@ -215,20 +251,21 @@ static BOOL confirmLiveness(xpc_connection_t conn) {
     ok = xpc_get_type(reply) != XPC_TYPE_ERROR;
     dispatch_semaphore_signal(done);
   });
-  if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, kLivenessTimeoutSec * NSEC_PER_SEC)) != 0) {
+  if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, timeoutMs * NSEC_PER_MSEC)) != 0) {
     return NO;
   }
   if (ok) usleep(kReplyTailUs); // device-open tail, paid once so later sends are warm
   return ok;
 }
 
-/// (Re)connect with liveness retries. Runs on the input queue; blocks it.
-static BOOL connectDigitizer(void) {
-  NSString *why = @"no attempt";
-  for (int attempt = 1; attempt <= kLivenessAttempts; attempt++) {
-    xpc_connection_t conn = openConnection(&why);
+/// (Re)connect with liveness retries. Runs on the input queue; blocks it. On failure
+/// `*why` says what the last attempt hit.
+static BOOL connectWith(int64_t timeoutMs, int attempts, useconds_t backoffUs, NSString **why) {
+  *why = @"no attempt";
+  for (int attempt = 1; attempt <= attempts; attempt++) {
+    xpc_connection_t conn = openConnection(why);
     if (conn != NULL) {
-      if (confirmLiveness(conn)) {
+      if (confirmLiveness(conn, timeoutMs)) {
         xpc_connection_t old = g_conn;
         g_conn = conn; // swap first so the old connection's INVALID is not mistaken for displacement
         if (old) xpc_connection_cancel(old);
@@ -237,16 +274,23 @@ static BOOL connectDigitizer(void) {
         return YES;
       }
       xpc_connection_cancel(conn);
-      why = @"dtuhidd did not answer the liveness probe";
+      *why = @"dtuhidd did not answer the liveness probe";
     }
-    if (attempt < kLivenessAttempts) usleep(kLivenessBackoffUs);
+    if (attempt < attempts) usleep(backoffUs);
   }
+  return NO;
+}
+
+/// Connect with the startup budget (dtuhidd may need demand-launching).
+static BOOL connectDigitizer(void) {
+  NSString *why = nil;
+  if (connectWith(kLivenessTimeoutMs, kLivenessAttempts, kLivenessBackoffUs, &why)) return YES;
   warn([NSString stringWithFormat:@"digitizer unavailable after %d attempts: %@", kLivenessAttempts, why]);
   return NO;
 }
 
 static void send(xpc_object_t msg) {
-  if (g_displaced) return; // displaced mid-command: step aside until the next gesture start
+  if (atomic_load(&g_displaced)) return; // displaced mid-command: step aside until the next gesture start
   if (g_invalid) {
     warn(@"dtuhidd connection was taken over or lost — reconnecting");
     if (!connectDigitizer()) return;
@@ -386,10 +430,16 @@ static void handle(NSDictionary *cmd) {
     markDisplaced();
     return;
   }
-  if (g_displaced) {
+  if (atomic_load(&g_displaced)) {
     if (!startsGesture(cmd)) return;
-    if (!connectDigitizer()) return; // still displaced; connectDigitizer warned
-    g_displaced = NO;
+    NSString *why = nil;
+    if (!connectWith(kReclaimTimeoutMs, kReclaimAttempts, kReclaimBackoffUs, &why)) {
+      // Still displaced: the next gesture start tries again.
+      emit(@{ @"t" : @"error",
+              @"detail" : [NSString stringWithFormat:@"reclaim failed after %d attempts: %@", kReclaimAttempts, why] });
+      return;
+    }
+    atomic_store(&g_displaced, false);
     emit(@{ @"t" : @"reclaimed" });
   }
   if ([t isEqualToString:@"touch"]) {
@@ -448,11 +498,28 @@ int main(int argc, char *argv[]) {
     double scale = g_device.deviceType.mainScreenScale ?: 1;
     g_widthPt = px.width / scale;
     g_heightPt = px.height / scale;
-    if (g_widthPt <= 0 || g_heightPt <= 0) fail(@"device reports no main screen size");
+    if (g_widthPt <= 0 || g_heightPt <= 0) failWith(4, @"device reports no main screen size");
+
+    // A shut-down device leaves our connection dead without a word (dtuhidd only reports
+    // "interrupted"): leave, and let the owner restart us once it is back.
+    g_deviceWatch = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                           dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    dispatch_source_set_timer(g_deviceWatch, dispatch_time(DISPATCH_TIME_NOW, 0), kDeviceWatchMs * NSEC_PER_MSEC,
+                              50 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(g_deviceWatch, ^{
+      NSString *state = g_device.stateString;
+      if (![state isEqualToString:@"Booted"]) {
+        failWith(5, [NSString stringWithFormat:@"device left Booted (state %@)", state]);
+      }
+    });
+    dispatch_resume(g_deviceWatch);
 
     __block BOOL up = NO;
+    if (!waitBootstatus([NSString stringWithUTF8String:argv[1]])) {
+      warn(@"bootstatus did not finish cleanly; connecting anyway");
+    }
     dispatch_sync(g_inputQueue, ^{ up = connectDigitizer(); });
-    if (!up) fail(@"dtuhidd digitizer service did not come up");
+    if (!up) failWith(1, @"dtuhidd digitizer service did not come up");
     emit(@{ @"t" : @"ready", @"w" : @(g_widthPt), @"h" : @(g_heightPt) });
 
     // Parent watch: stop if the app dies without closing our stdin.

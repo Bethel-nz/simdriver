@@ -35,8 +35,11 @@
  * Not a TCC screen capture: the framebuffer is the device's own GPU surface.
  *
  * Usage: sdframe <udid> [--fps 60] [--scale 2] [--verbose]
- * Stops (unlinking its segments) on stdin EOF, SIGINT, SIGTERM or parent exit.
- * Exit codes: 0 ok/stop, 2 usage, 3 device not found/not booted, 4 no surface.
+ * Stops (unlinking its segments) on stdin EOF, SIGINT, SIGTERM or parent exit, and
+ * when the device leaves Booted (its surfaces go dead silently across a reboot, so the
+ * owner restarts sdframe once the device is back).
+ * Exit codes: 0 ok/stop, 2 usage, 3 device not found/not booted, 4 no surface,
+ * 5 the device left Booted while running.
  */
 
 #import <Foundation/Foundation.h>
@@ -663,6 +666,7 @@ static void unregisterCallbacks(void) {
 
 static dispatch_queue_t g_pollQueue = nil;
 static dispatch_source_t g_pollSource = nil;
+static dispatch_source_t g_deviceWatch = nil;
 // Per-source last-seen (id, seed): "screen" = enumerated display object,
 // "desc" = io-port display descriptor. Either source changing means presents
 // happened; emit from the source that moved.
@@ -820,7 +824,7 @@ static void pollTick(void) {
   }
 }
 
-static void requestStop(int signalNumber) {
+static void stopWith(NSString *why, int code) {
   @autoreleasepool {
     // Hop onto the frame queue so teardown never races a poll tick or callback.
     dispatch_sync(g_frameQueue, ^{
@@ -832,12 +836,17 @@ static void requestStop(int signalNumber) {
       unregisterCallbacks();
       unlinkAllSegments();
     });
-    if (signalNumber == 0) emitNote(@"stopping on stdin EOF");
-    else emitNote([NSString stringWithFormat:@"stopping on signal %d", signalNumber]);
+    emitNote(why);
     // _exit: skip stdio teardown — the writer thread may still be parked in a
     // write to a pipe nobody drains, and nothing buffered is worth flushing.
-    _exit(0);
+    _exit(code);
   }
+}
+
+static void requestStop(int signalNumber) {
+  stopWith(signalNumber == 0 ? @"stopping on stdin EOF"
+                             : [NSString stringWithFormat:@"stopping on signal %d", signalNumber],
+           0);
 }
 
 int main(int argc, char * argv[]) {
@@ -1086,6 +1095,19 @@ int main(int argc, char * argv[]) {
     dispatch_source_set_event_handler(parentExit, ^{ requestStop(SIGHUP); });
     dispatch_resume(parentExit);
     if (getppid() == 1) requestStop(SIGHUP); // already orphaned before the watch armed
+
+    // Device watch: after a shutdown the held surfaces never fire again, so leave.
+    g_deviceWatch = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                           dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    dispatch_source_set_timer(g_deviceWatch, dispatch_time(DISPATCH_TIME_NOW, 0), 500 * NSEC_PER_MSEC,
+                              50 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(g_deviceWatch, ^{
+      NSString *state = device.stateString;
+      if (![state isEqualToString:@"Booted"]) {
+        stopWith([NSString stringWithFormat:@"device left Booted (state %@)", state], 5);
+      }
+    });
+    dispatch_resume(g_deviceWatch);
 
     emitNote(@"running; Ctrl/C SIGTERM to stop");
     dispatch_main();

@@ -11,6 +11,12 @@
 //!                      `{"t":"_exit","code":N}` prints "fake_helper: exiting N" on stderr and
 //!                      exits with N. Exit 0 on stdin EOF.
 //!   lines <code> <l>…  print each argument as a line, then exit with <code>.
+//!   fail <code> <msg>  print <msg> on stderr, then exit with <code>.
+//!   frames <name> <slots> <cap>
+//!                      sdframe stand-in over a segment the test created and filled (seqs 2,
+//!                      4, 6 in slots 0, 1, 2): prints the `shm` line, then announces those
+//!                      three frames in turn every 16 ms. `{"t":"_exit","code":N}` on stdin
+//!                      exits with N (stderr "fake_helper: exiting N"); stdin EOF exits 0.
 //!   stubborn           ignore SIGINT and stdin EOF; sleep until killed.
 use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
@@ -30,6 +36,11 @@ fn main() {
             out.flush().unwrap();
             std::process::exit(code);
         }
+        Some("fail") => {
+            eprintln!("{}", args[2]);
+            std::process::exit(args[1].parse().unwrap());
+        }
+        Some("frames") => frames(&args[1], &args[2], &args[3]),
         Some("stubborn") => {
             unsafe {
                 libc::signal(libc::SIGINT, libc::SIG_IGN);
@@ -62,6 +73,34 @@ fn echo() {
     }
 }
 
+/// `{"t":"_exit","code":N}` -> N.
+fn exit_code(line: &str) -> Option<i32> {
+    line.strip_prefix(r#"{"t":"_exit","code":"#)?.trim_end_matches('}').parse().ok()
+}
+
+fn frames(name: &str, slots: &str, cap: &str) {
+    std::thread::spawn(|| {
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if let Some(code) = exit_code(&line) {
+                eprintln!("fake_helper: exiting {code}");
+                std::process::exit(code);
+            }
+        }
+        std::process::exit(0);
+    });
+    let mut out = std::io::stdout().lock();
+    writeln!(out, r#"{{"t":"shm","name":"{name}","slots":{slots},"cap":{cap}}}"#).unwrap();
+    loop {
+        for (slot, seq) in [(0, 2), (1, 4), (2, 6)] {
+            if writeln!(out, r#"{{"t":"frame","slot":{slot},"seq":{seq}}}"#).and_then(|_| out.flush()).is_err() {
+                std::process::exit(0);
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        }
+    }
+}
+
 fn hid(dir: PathBuf) {
     while !dir.join("go").exists() {
         std::thread::sleep(Duration::from_millis(5));
@@ -79,8 +118,7 @@ fn hid(dir: PathBuf) {
             out.flush().unwrap();
             continue;
         }
-        if let Some(rest) = line.strip_prefix(r#"{"t":"_exit","code":"#) {
-            let code: i32 = rest.trim_end_matches('}').parse().unwrap();
+        if let Some(code) = exit_code(&line) {
             eprintln!("fake_helper: exiting {code}");
             std::process::exit(code);
         }
