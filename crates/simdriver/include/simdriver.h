@@ -52,8 +52,8 @@ void sd_button(struct sd_driver *d, int32_t button_code, uint32_t presses, float
 void sd_stop(struct sd_driver *d);
 
 /**
- * The last error on this thread, from the most recent `sd_` call that failed.
- * Valid until the next `sd_` call on this thread. Empty on a fresh thread. Never NULL.
+ * The last error on this thread: valid until the next `sd_` call on this thread.
+ * Empty when the last call succeeded. Never NULL.
  */
 const char *sd_last_error(void);
 
