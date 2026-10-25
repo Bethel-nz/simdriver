@@ -7,9 +7,12 @@ pub fn baked_helper_dir() -> &'static Path {
 
 mod devices;
 mod error;
+mod frames;
 // Consumed by the driver (Task 9); unused until then.
 #[allow(dead_code)]
 mod gesture;
+mod helper;
+mod hid;
 mod protocol;
 mod shm;
 // Consumed by the driver (Task 9); unused until then.
@@ -25,6 +28,9 @@ pub use stats::Stats;
 
 #[doc(hidden)]
 pub mod __internal {
+    pub use crate::frames::FramePipeline;
+    pub use crate::helper::{HELPER_DIR_ENV, Supervised, helper_dir};
+    pub use crate::hid::{HidClient, HidEvent, QUEUE_CAP};
     pub use crate::protocol::*;
     pub use crate::shm::*;
 }
