@@ -12,12 +12,16 @@ mod error;
 mod gesture;
 mod protocol;
 mod shm;
+// Consumed by the driver (Task 9); unused until then.
+#[allow(dead_code)]
+mod stats;
 
 pub use devices::{boot, list_devices, shutdown, Device, DeviceSelector};
 pub use error::Error;
 pub use gesture::ScrollPhase;
 pub use protocol::Phase;
 pub use shm::Frame;
+pub use stats::Stats;
 
 #[doc(hidden)]
 pub mod __internal {
