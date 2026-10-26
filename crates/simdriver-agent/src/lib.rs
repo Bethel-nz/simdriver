@@ -45,7 +45,8 @@ const SETTLE_DEFAULT: Duration = Duration::from_secs(10);
 const FOCUS_WAIT: Duration = Duration::from_millis(300);
 const WAIT_FOR_DEFAULT: Duration = Duration::from_secs(5);
 const CAPTURE_WAIT: Duration = Duration::from_secs(1);
-/// Held at a drag's start so iOS treats the stroke as a drag, not a scroll.
+/// How long a pinch or rotation stroke takes.
+const GESTURE_STROKE: Duration = Duration::from_millis(300);
 /// A scroll drags this share of the region, over this long (slow enough to not fling far).
 const SCROLL_SHARE: f64 = 0.5;
 const SCROLL_TIME: Duration = Duration::from_millis(350);
@@ -79,25 +80,9 @@ pub trait Device: Send + Sync {
     /// Place two fingers at exact box points for pinch and rotation gestures.
     fn touch2(&self, phase: simdriver::Phase, a: (f64, f64), b: (f64, f64));
     /// Pinch around a point in 0..1 screen coordinates. Keeps both fingers on-screen.
+    /// A smooth stroke, not one jump: gesture recognizers need intermediate moves.
     fn pinch(&self, center: (f64, f64), scale: f64) -> Result<(), AgentError> {
-        let (w, h) = self.screen_points().ok_or_else(|| AgentError::NotReady("screen size is not ready".into()))?;
-        if !scale.is_finite() || scale <= 0.0 {
-            return Err(AgentError::Invalid("pinch scale must be a positive finite number".into()));
-        }
-        let scale = scale.clamp(0.25, 4.0);
-        let (cx, cy) = (center.0 * w, center.1 * h);
-        let room = cx.min(w - cx).min(cy).min(h - cy);
-        let radius = 50.0_f64.min(room / scale.max(1.0));
-        if radius < 1.0 {
-            return Err(AgentError::Invalid("pinch target is too close to the screen edge".into()));
-        }
-        let points = |r: f64| ((cx - r) / w, cy / h, (cx + r) / w, cy / h);
-        let (x1, y1, x2, y2) = points(radius);
-        self.touch2(simdriver::Phase::Down, (x1, y1), (x2, y2));
-        let (x1, y1, x2, y2) = points(radius * scale);
-        self.touch2(simdriver::Phase::Move, (x1, y1), (x2, y2));
-        self.touch2(simdriver::Phase::Up, (x1, y1), (x2, y2));
-        Ok(())
+        self.transform(center, 0.0, 0.0, scale, 0.0, GESTURE_STROKE)
     }
     /// Combined two-finger transform. Translation uses screen fractions; scale is a ratio.
     fn transform(&self, center: (f64, f64), dx: f64, dy: f64, scale: f64, degrees: f64, duration: Duration) -> Result<(), AgentError> {
@@ -126,29 +111,9 @@ pub trait Device: Send + Sync {
         self.touch2(simdriver::Phase::Up, (end.0, end.1), (end.2, end.3));
         Ok(())
     }
-    /// Rotate two fingers around a point in 0..1 screen coordinates.
+    /// Rotate two fingers around a point in 0..1 screen coordinates, in one smooth stroke.
     fn rotate(&self, center: (f64, f64), degrees: f64) -> Result<(), AgentError> {
-        let (w, h) = self.screen_points().ok_or_else(|| AgentError::NotReady("screen size is not ready".into()))?;
-        if !degrees.is_finite() {
-            return Err(AgentError::Invalid("rotation degrees must be finite".into()));
-        }
-        let (cx, cy) = (center.0 * w, center.1 * h);
-        let radius = 50.0_f64.min(cx).min(w - cx).min(cy).min(h - cy);
-        if radius < 1.0 {
-            return Err(AgentError::Invalid("rotation target is too close to the screen edge".into()));
-        }
-        let angle = degrees.to_radians();
-        let start = ((cx - radius) / w, cy / h, (cx + radius) / w, cy / h);
-        let end = (
-            (cx - radius * angle.cos()) / w,
-            (cy - radius * angle.sin()) / h,
-            (cx + radius * angle.cos()) / w,
-            (cy + radius * angle.sin()) / h,
-        );
-        self.touch2(simdriver::Phase::Down, (start.0, start.1), (start.2, start.3));
-        self.touch2(simdriver::Phase::Move, (end.0, end.1), (end.2, end.3));
-        self.touch2(simdriver::Phase::Up, (end.0, end.1), (end.2, end.3));
-        Ok(())
+        self.transform(center, 0.0, 0.0, 1.0, degrees, GESTURE_STROKE)
     }
     fn text(&self, s: &str);
     fn key(&self, name: &str) -> bool;
@@ -878,11 +843,12 @@ impl<D: Device> Agent<D> {
             let root = self.device.accessibility()?;
             let (fresh, _) = marks::elements(&root, screen);
             let inputs = fresh.iter().filter(|e| e.takes_text()).collect::<Vec<_>>();
-            let field = inputs.iter().copied()
-                .filter(|e| e.same_identity(seed))
-                .min_by(|a, b| a.moved_by(seed).total_cmp(&b.moved_by(seed)))
-                .or_else(|| inputs.into_iter().min_by(|a, b| a.moved_by(seed).total_cmp(&b.moved_by(seed)))
-                    .filter(|e| e.moved_by(seed) < 80.0));
+            // The same field; else the nearest input; else the only one — a focused field
+            // can move far and change its label (Settings' search jumps above the keyboard).
+            let by_distance = |a: &&Element, b: &&Element| a.moved_by(seed).total_cmp(&b.moved_by(seed));
+            let field = inputs.iter().copied().filter(|e| e.same_identity(seed)).min_by(by_distance)
+                .or_else(|| inputs.iter().copied().min_by(by_distance).filter(|e| e.moved_by(seed) < 80.0))
+                .or_else(|| (inputs.len() == 1).then(|| inputs[0]));
             if let Some(field) = field { return Ok(field.value.clone()); }
             if Instant::now() >= deadline { return Err(AgentError::CommitNotObserved); }
             thread::sleep(POLL);
@@ -944,8 +910,16 @@ impl<D: Device> Agent<D> {
             self.device.text(&chunk.iter().collect::<String>());
             thread::sleep(Duration::from_millis(20));
         }
-        thread::sleep(FOCUS_WAIT);
-        let final_value = self.field_value(&field, screen)?;
+        // Keystrokes land over time (slower under load): read back until the value
+        // matches, or a mismatch (autocorrect, an input mask) holds for the whole wait.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let final_value = loop {
+            let v = self.field_value(&field, screen)?;
+            if v.as_deref() == Some(value) || Instant::now() >= deadline {
+                break v;
+            }
+            thread::sleep(POLL);
+        };
         let verified = match final_value.as_deref() {
             Some(actual) => actual == value && field.placeholder.as_deref() != Some(actual),
             None if field.placeholder.is_some() => false,
@@ -1369,22 +1343,38 @@ fn keyboard_frame(root: &AxNode, screen: (f64, f64)) -> Option<[f64; 4]> {
 
 fn alert_info(root: &AxNode) -> Option<AlertInfo> {
     let all = root.descendants();
-    let alert = all.iter().find(|n| n.role.to_ascii_lowercase().contains("alert"));
-    let nodes = alert.map(|n| n.descendants()).unwrap_or_else(|| all.clone());
-    let texts: Vec<String> = nodes.iter().filter(|n| n.role.ends_with("StaticText"))
-        .filter_map(|n| n.label.clone().or_else(|| n.value.clone())).collect();
-    let buttons: Vec<String> = nodes.iter().filter(|n| n.role.ends_with("Button"))
-        .filter_map(|n| n.label.clone().or_else(|| n.value.clone())).collect();
-    if alert.is_none() {
-        // iOS 27 exposes Safari's permission sheet as three top-level buttons, without
-        // an AXAlert container. Require both an allow choice and a safe denial choice.
-        let labels: Vec<_> = buttons.iter().map(|s| normalized_alert_label(s)).collect();
-        let allow = labels.iter().any(|s| ["allow while using app", "allow once", "allow"].contains(&s.as_str()));
-        let deny = labels.iter().any(|s| s == "don't allow");
-        let open_prompt = labels.iter().any(|s| s == "open") && labels.iter().any(|s| s == "cancel");
-        if !(allow && deny) && !open_prompt { return None; }
-    }
+    let scope = match all.iter().find(|n| n.role.to_ascii_lowercase().contains("alert")) {
+        Some(alert) => *alert,
+        // No AXAlert container (iOS 27's permission sheets, prompts found by hit-testing):
+        // only a prompt's own button set counts — an allow choice with a safe denial, or
+        // Open with Cancel — scoped to the smallest container holding it.
+        None => all.iter().copied().filter(|n| is_prompt(n)).min_by_key(|n| n.descendants().len())?,
+    };
+    let nodes = scope.descendants();
+    let text = |n: &&AxNode| n.label.clone().or_else(|| n.value.clone());
+    // The status bar's clock and carrier are on screen, never part of a prompt.
+    let texts: Vec<String> = nodes
+        .iter()
+        .filter(|n| n.role.ends_with("StaticText") && n.frame[1] + n.frame[3] > STATUS_BAR)
+        .filter_map(text)
+        .collect();
+    let buttons: Vec<String> = nodes.iter().filter(|n| n.role.ends_with("Button")).filter_map(text).collect();
     Some(AlertInfo { title: texts.first().cloned(), message: (texts.len() > 1).then(|| texts[1..].join(" ")), buttons })
+}
+
+/// Height of the status bar strip, in points (taller on Dynamic Island phones).
+const STATUS_BAR: f64 = 54.0;
+
+fn is_prompt(n: &AxNode) -> bool {
+    let labels: Vec<String> = n
+        .descendants()
+        .into_iter()
+        .filter(|n| n.role.ends_with("Button"))
+        .filter_map(|n| n.label.as_deref().map(normalized_alert_label))
+        .collect();
+    let has = |s: &str| labels.iter().any(|l| l == s);
+    let allow = has("allow while using app") || has("allow once") || has("allow");
+    (allow && has("don't allow")) || (has("open") && has("cancel"))
 }
 
 fn normalized_alert_label(s: &str) -> String {
@@ -1931,6 +1921,30 @@ mod tests {
     }
 
     #[test]
+    fn a_hit_tested_prompt_reads_without_the_status_bar() {
+        // What sdax returns when a system prompt covers an app's keyboard: SpringBoard's
+        // status bar, plus the prompt's container found by hit-testing.
+        let screen = node("AXApplication", " ", [0.0, 0.0, 400.0, 800.0], vec![
+            node("AXStaticText", "13:38", [30.0, 14.0, 60.0, 20.0], vec![]),
+            node("AXGenericElement", "", [40.0, 300.0, 320.0, 260.0], vec![
+                node("AXStaticText", "Allow “Safari” to use your location?", [60.0, 320.0, 280.0, 40.0], vec![]),
+                node("AXStaticText", "Websites you visit may request your location.", [60.0, 360.0, 280.0, 40.0], vec![]),
+                node("AXButton", "Allow Once", [60.0, 410.0, 280.0, 44.0], vec![]),
+                node("AXButton", "Allow While Using App", [60.0, 460.0, 280.0, 44.0], vec![]),
+                node("AXButton", "Don’t Allow", [60.0, 510.0, 280.0, 44.0], vec![]),
+            ]),
+        ]);
+        let info = alert_info(&screen).expect("a prompt");
+        assert_eq!(info.title.as_deref(), Some("Allow “Safari” to use your location?"));
+        assert_eq!(info.message.as_deref(), Some("Websites you visit may request your location."));
+        assert_eq!(info.buttons.len(), 3);
+        let a = Agent::new(Fake::new(screen));
+        let r = a.steps(&[Step::Alert { op: "dismiss".into(), ms: None }]);
+        assert!(r.ok, "{:?}", r.failed);
+        assert_eq!(lock(&a.device.taps).clone(), [(0.5, 532.0 / 800.0)], "Don’t Allow");
+    }
+
+    #[test]
     fn scroll_drags_the_content_the_other_way() {
         let a = Agent::new(Fake::new(login()));
         let r = a.steps(&serde_json::from_str::<Vec<Step>>(
@@ -1988,17 +2002,23 @@ mod tests {
         .unwrap());
         assert!(r.ok, "{:?}", r.failed);
         let gestures = lock(&a.device.touch2).clone();
-        assert_eq!(gestures.len(), 6);
-        assert_eq!(gestures[0].0, simdriver::Phase::Down);
-        assert_eq!(gestures[1].0, simdriver::Phase::Move);
-        assert_eq!(gestures[2].0, simdriver::Phase::Up);
-        assert_eq!(gestures[3].0, simdriver::Phase::Down);
-        assert_eq!(gestures[4].0, simdriver::Phase::Move);
-        assert_eq!(gestures[5].0, simdriver::Phase::Up);
+        let phases = |from: usize| gestures[from..].iter().position(|g| g.0 == simdriver::Phase::Up).unwrap() + from;
+        let pinch_up = phases(0);
+        let rotate_up = phases(pinch_up + 1);
+        assert_eq!(rotate_up, gestures.len() - 1);
+        for (down, up) in [(0, pinch_up), (pinch_up + 1, rotate_up)] {
+            assert_eq!(gestures[down].0, simdriver::Phase::Down);
+            assert!(up - down > 3, "a stroke of several moves, not one jump");
+            assert!(gestures[down + 1..up].iter().all(|g| g.0 == simdriver::Phase::Move));
+        }
+        // The pinch opens 50 pt → 100 pt either side of the centre.
         assert_eq!(gestures[0].1, (0.375, 0.5));
         assert_eq!(gestures[0].2, (0.625, 0.5));
-        assert_eq!(gestures[1].1, (0.25, 0.5));
-        assert_eq!(gestures[1].2, (0.75, 0.5));
+        assert_eq!(gestures[pinch_up].1, (0.25, 0.5));
+        assert_eq!(gestures[pinch_up].2, (0.75, 0.5));
+        // The rotation ends a quarter turn round: fingers stacked vertically.
+        let (a1, a2) = (gestures[rotate_up].1, gestures[rotate_up].2);
+        assert!((a1.0 - a2.0).abs() < 1e-9 && a1.1 < a2.1, "{a1:?} {a2:?}");
     }
 
     #[test]

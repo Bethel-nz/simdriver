@@ -40,6 +40,7 @@
 
 #import "CoreSimulator/SimDeviceSet.h"
 #import "CoreSimulator/SimDevice.h"
+#import "CoreSimulator/SimDeviceType.h"
 
 static NSString *const kAXFramework =
     @"/System/Library/PrivateFrameworks/AccessibilityPlatformTranslation.framework/AccessibilityPlatformTranslation";
@@ -58,6 +59,7 @@ static const int kMaxNodes = 4000;
 - (void)setSupportsDelegateTokens:(BOOL)supports;
 - (id)frontmostApplicationWithDisplayId:(unsigned)displayId bridgeDelegateToken:(NSString *)token;
 - (id)macPlatformElementFromTranslation:(id)translation;
+- (id)objectAtPoint:(CGPoint)point displayId:(unsigned)displayId bridgeDelegateToken:(NSString *)token;
 @end
 
 @protocol SDAXTranslation
@@ -233,6 +235,80 @@ static NSDictionary *node(id element, int depth) {
   return out;
 }
 
+// ─── hit-test fallback ───────────────────────────────────────────────────────
+//
+// A system prompt raised over an app with its keyboard up (Safari asking for location)
+// leaves the frontmost-app tree as SpringBoard's bare status bar: the prompt is on
+// screen but not in the tree. Hit-testing still reaches it, as idb's describe-point
+// does, so when the tree has nothing to act on we probe a coarse grid of points, climb
+// each hit to its outermost container short of full screen, and dump those.
+
+static const double kProbeStep = 40;          // pt between probes; buttons are ≥ 44 pt
+static const CFTimeInterval kProbeBudget = 2; // s, so a pathological screen stays bounded
+
+static BOOL actionable(NSDictionary *n) {
+  NSString *role = n[@"role"];
+  if (!([role isEqual:@"AXApplication"] || [role isEqual:@"AXStaticText"] ||
+        [role isEqual:@"AXGenericElement"] || [role isEqual:@"AXGroup"] || [role isEqual:@"AXImage"])) {
+    return YES;
+  }
+  for (NSDictionary *child in n[@"children"]) {
+    if (actionable(child)) return YES;
+  }
+  return NO;
+}
+
+static void adoptToken(id element) {
+  if (![element respondsToSelector:@selector(translation)]) return;
+  id translation = [(id<SDAXPlatformElement>)element translation];
+  if ([translation respondsToSelector:@selector(setBridgeDelegateToken:)]) {
+    [(id<SDAXTranslation>)translation setBridgeDelegateToken:g_token];
+  }
+}
+
+static BOOL coversScreen(NSRect f, CGSize screen) {
+  return f.size.width * f.size.height >= 0.9 * screen.width * screen.height;
+}
+
+/// Containers found by hit-testing, as nodes; empty when nothing answers.
+static NSArray *probe(void) {
+  if (![(id)g_translator respondsToSelector:@selector(objectAtPoint:displayId:bridgeDelegateToken:)]) return @[];
+  CGSize px = g_device.deviceType.mainScreenSize;
+  double scale = g_device.deviceType.mainScreenScale ?: 1;
+  CGSize screen = CGSizeMake(px.width / scale, px.height / scale);
+  NSMutableArray *found = [NSMutableArray new];
+  NSMutableArray<NSValue *> *covered = [NSMutableArray new];
+  CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + kProbeBudget;
+  for (double y = kProbeStep; y < screen.height - kProbeStep / 2; y += kProbeStep) {
+    for (double x = kProbeStep / 2; x < screen.width; x += kProbeStep) {
+      if (CFAbsoluteTimeGetCurrent() > deadline) return found;
+      NSPoint p = NSMakePoint(x, y);
+      BOOL seen = NO;
+      for (NSValue *r in covered) {
+        if (NSPointInRect(p, r.rectValue)) { seen = YES; break; }
+      }
+      if (seen) continue;
+      id hit = [g_translator objectAtPoint:p displayId:0 bridgeDelegateToken:g_token];
+      if (hit == nil) continue;
+      [(id<SDAXTranslation>)hit setBridgeDelegateToken:g_token];
+      NSAccessibilityElement *el = [g_translator macPlatformElementFromTranslation:hit];
+      if (el == nil) continue;
+      for (int i = 0; i < kMaxDepth; i++) {
+        NSAccessibilityElement *parent = el.accessibilityParent;
+        if (parent == nil) break;
+        adoptToken(parent);
+        if ([parent.accessibilityRole isEqual:@"AXApplication"] || coversScreen(parent.accessibilityFrame, screen)) break;
+        el = parent;
+      }
+      NSRect f = el.accessibilityFrame;
+      if (coversScreen(f, screen) || f.size.width <= 0 || f.size.height <= 0) continue;
+      [covered addObject:[NSValue valueWithRect:f]];
+      [found addObject:node(el, 1)];
+    }
+  }
+  return found;
+}
+
 static void snapshot(id requestId) {
   @autoreleasepool {
     g_requests = 0;
@@ -251,6 +327,14 @@ static void snapshot(id requestId) {
       return;
     }
     NSDictionary *tree = node(root, 0);
+    if (!actionable(tree)) {
+      NSArray *extra = probe();
+      if (extra.count > 0) {
+        NSMutableDictionary *merged = [tree mutableCopy];
+        merged[@"children"] = [(tree[@"children"] ?: @[]) arrayByAddingObjectsFromArray:extra];
+        tree = merged;
+      }
+    }
     double ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0;
     emit(@{ @"t" : @"ax", @"id" : requestId, @"ms" : @(round(ms * 10) / 10), @"requests" : @(g_requests),
             @"root" : tree });

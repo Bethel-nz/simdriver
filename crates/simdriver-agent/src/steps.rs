@@ -47,9 +47,11 @@ pub enum Step {
     },
     /// Open a URL; this can switch the foreground app.
     OpenUrl { url: String },
-    /// Launch an installed app by bundle identifier.
+    /// Launch an installed app by bundle identifier (`bundleId`).
+    #[serde(rename_all = "camelCase")]
     Launch { bundle_id: String },
-    /// Terminate an app by bundle identifier.
+    /// Terminate an app by bundle identifier (`bundleId`).
+    #[serde(rename_all = "camelCase")]
     Terminate { bundle_id: String },
     /// Set the simulator's location.
     SetLocation { lat: f64, lon: f64 },
@@ -181,7 +183,10 @@ mod tests {
                 {"action":"appearance","appearance":"dark"},
                 {"action":"keyboardDismiss"},
                 {"action":"back","mode":"inApp"},
-                {"action":"screenshotElement","target":"e1"}]"#,
+                {"action":"screenshotElement","target":"e1"},
+                {"action":"launch","bundleId":"com.apple.Preferences"},
+                {"action":"swipe","from":[0.5,0.8],"to":"e2","count":2,"pauseMs":100},
+                {"action":"drag","from":"e1","to":"e2","sourceHoldMs":300,"moveMs":400,"destinationHoldMs":50}]"#,
         )
         .unwrap();
         assert_eq!(steps[0], Step::LongPress { target: "e4".into(), ms: None });
@@ -197,6 +202,27 @@ mod tests {
         assert_eq!(steps[10], Step::KeyboardDismiss);
         assert_eq!(steps[11], Step::Back { mode: "inApp".into() });
         assert_eq!(steps[12], Step::ScreenshotElement { target: "e1".into() });
+        assert_eq!(steps[13], Step::Launch { bundle_id: "com.apple.Preferences".into() });
+        assert_eq!(
+            steps[14],
+            Step::Swipe {
+                from: SwipeTarget::Point([0.5, 0.8]),
+                to: SwipeTarget::Target("e2".into()),
+                count: Some(2),
+                pause_ms: Some(100)
+            }
+        );
+        assert_eq!(
+            steps[15],
+            Step::Drag {
+                from: "e1".into(),
+                to: "e2".into(),
+                source_hold_ms: Some(300),
+                move_ms: Some(400),
+                destination_hold_ms: Some(50)
+            }
+        );
+        assert!(serde_json::from_str::<Step>(r#"{"action":"launch","bundle_id":"x"}"#).is_err(), "camelCase only");
         assert!(serde_json::from_str::<Step>(r#"{"action":"tap","targt":"x"}"#).is_err(), "typos are errors");
     }
 }

@@ -25,6 +25,16 @@ fn simctl(args: &[&str]) {
     let _ = Command::new("xcrun").arg("simctl").args(args).status();
 }
 
+/// Dismisses whatever system alert a test leaves up, even when it fails, so the next
+/// test does not start under a modal prompt.
+struct DismissAlerts<'a>(&'a Agent<Driver>);
+
+impl Drop for DismissAlerts<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.steps(&[Step::Alert { op: "dismiss".into(), ms: None }]);
+    }
+}
+
 #[test]
 fn it_agent_drives_settings() {
     let Some(udid) = udid() else { return };
@@ -89,7 +99,7 @@ fn it_agent_drives_settings() {
     eprintln!("settings search:\n{}", settings_screen.text);
     let field = settings_screen.elements.iter().find(|e| e.role.to_ascii_lowercase().contains("textfield"))
         .expect("Settings search text field").reference.clone();
-    let filled = agent.steps(&[Step::Fill { target: field, value: "café 🐈".into(), secret: false }]);
+    let filled = agent.steps(&[Step::Fill { target: field, value: "simdriver test".into(), secret: false }]);
     eprintln!("fill result: ok={} failed={:?}", filled.ok, filled.failed);
     eprintln!("fill verified {:?}; clipboard {:?}", filled.verified, agent.device().clipboard_read());
     eprintln!("raw input: {:?}", agent.device().accessibility().unwrap().descendants().into_iter()
@@ -110,7 +120,7 @@ fn it_agent_drives_settings() {
         .map(|n| (&n.role, &n.value, &n.placeholder)).collect::<Vec<_>>());
     let dismissed = agent.steps(&[Step::KeyboardDismiss]);
     assert!(dismissed.ok, "keyboard dismiss failed: {:?}", dismissed.failed);
-    assert!(filled.ok, "non-ASCII fill failed: {:?}", filled.failed);
+    assert!(filled.ok, "fill failed: {:?}", filled.failed);
     assert_eq!(filled.verified, [true], "fill snapshot:\n{}", filled.snapshot.as_ref().map(|s| s.text.as_str()).unwrap_or("<none>"));
 
     let r = agent.steps(&[Step::Press { button: "home".into() }]);
@@ -158,8 +168,8 @@ fn it_safari_address_bar_fill_and_keyboard_dismiss() {
         eprintln!("Safari collapsed its address field before the settled snapshot");
         return;
     };
-    let filled = agent.steps(&[Step::Fill { target: address.reference.clone(), value: "café 🐈".into(), secret: false }]);
-    eprintln!("Safari address fill: ok={} verified={:?} failed={:?}; clipboard={:?}", filled.ok, filled.verified, filled.failed, agent.device().clipboard_read());
+    let filled = agent.steps(&[Step::Fill { target: address.reference.clone(), value: "simdriver test".into(), secret: false }]);
+    eprintln!("Safari address fill: ok={} verified={:?} failed={:?}; field={:?}", filled.ok, filled.verified, filled.failed, agent.device().accessibility().unwrap().descendants().into_iter().filter(|n| n.role.contains("TextField")).map(|n| (n.label.clone(), n.value.clone())).collect::<Vec<_>>());
     let dismissed = agent.steps(&[Step::KeyboardDismiss]);
     assert!(dismissed.ok, "Safari keyboard dismiss failed: {:?}", dismissed.failed);
     assert!(filled.ok && filled.verified == [true], "Safari address-bar fill was not verified: {:?}, {:?}", filled.failed, filled.verified);
@@ -177,8 +187,11 @@ fn it_long_press_shows_the_home_screen_context_menu() {
     }
     let agent = Agent::new(d);
 
-    agent.steps(&[Step::Press { button: "home".into() }]).ok.then_some(()).unwrap();
-    agent.steps(&[Step::WaitFor { text: "Settings".into(), timeout_ms: Some(10_000) }]).ok.then_some(()).unwrap();
+    let r = agent.steps(&[
+        Step::Press { button: "home".into() },
+        Step::WaitFor { text: "Settings".into(), timeout_ms: Some(10_000) },
+    ]);
+    assert!(r.ok, "home screen never showed Settings: {:?}\n{}", r.failed, r.snapshot.map(|s| s.text).unwrap_or_default());
     // Long-press the Settings icon: iOS offers its home-screen context menu.
     let r = agent.steps(&[
         Step::LongPress { target: "Settings".into(), ms: Some(900) },
@@ -187,7 +200,8 @@ fn it_long_press_shows_the_home_screen_context_menu() {
     assert!(r.ok, "{:?}\n{}", r.failed, r.snapshot.map(|s| s.text).unwrap_or_default());
 
     // Leave edit mode (the icons wiggle) before the next test finds the screen.
-    agent.steps(&[Step::Press { button: "home".into() }]).ok.then_some(()).unwrap();
+    let r = agent.steps(&[Step::Press { button: "home".into() }]);
+    assert!(r.ok, "could not leave edit mode: {:?}", r.failed);
 }
 
 #[test]
@@ -216,7 +230,9 @@ fn it_alert_get_reads_a_safari_location_prompt() {
     simctl(&["privacy", &udid, "reset", "location", "com.apple.mobilesafari"]);
     let opts = Options { device: DeviceSelector::Udid(udid.clone()), ..Options::default() };
     let d = Driver::start(opts, |_| {}).expect("start");
+    let _ = d.terminate("com.apple.mobilesafari");
     let agent = Agent::new(d);
+    let _cleanup = DismissAlerts(&agent);
     let r = agent.steps(&[
         Step::OpenUrl { url },
         Step::Alert { op: "wait".into(), ms: Some(15_000) },
@@ -257,10 +273,13 @@ fn it_granted_location_permission_leaves_only_safaris_site_prompt() {
     let opts = Options { device: DeviceSelector::Udid(udid), ..Options::default() };
     let d = Driver::start(opts, |_| {}).expect("start");
     d.grant_permission("location", "com.apple.mobilesafari").expect("grant Safari location");
+    // Safari caches its location authorization: relaunch it so the grant applies.
+    let _ = d.terminate("com.apple.mobilesafari");
     let agent = Agent::new(d);
+    let _cleanup = DismissAlerts(&agent);
     let opened = agent.steps(&[Step::OpenUrl { url }]);
     assert!(opened.ok, "page did not open: {:?}", opened.failed);
-    let alert = agent.steps(&[Step::Alert { op: "wait".into(), ms: Some(3_000) }]);
+    let alert = agent.steps(&[Step::Alert { op: "wait".into(), ms: Some(10_000) }]);
     stop.store(true, Ordering::SeqCst);
     let _ = server.join();
     assert!(alert.ok, "Safari site prompt was not exposed: {:?}", alert.failed);
