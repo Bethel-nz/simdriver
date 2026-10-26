@@ -150,14 +150,16 @@ fn it_safari_address_bar_fill_and_keyboard_dismiss() {
     let agent = Agent::new(d);
     let opened = agent.steps(&[Step::OpenUrl { url: "https://example.com/?simdriver=address-fill".into() }]);
     assert!(opened.ok, "openUrl failed: {:?}", opened.failed);
+    let address_bar = agent.steps(&[Step::Key { name: "cmd+l".into() }]);
+    assert!(address_bar.ok, "Safari address bar did not focus: {:?}", address_bar.failed);
     let safari = agent.snapshot(&SnapshotOptions::default()).unwrap();
     eprintln!("Safari address experiment:\n{}", safari.text);
     let Some(address) = safari.elements.iter().find(|e| e.role.contains("textfield")) else {
         eprintln!("Safari collapsed its address field before the settled snapshot");
         return;
     };
-    let filled = agent.steps(&[Step::Fill { target: address.reference.clone(), value: "example.org".into(), secret: false }]);
-    eprintln!("Safari address fill: ok={} verified={:?} failed={:?}", filled.ok, filled.verified, filled.failed);
+    let filled = agent.steps(&[Step::Fill { target: address.reference.clone(), value: "café 🐈".into(), secret: false }]);
+    eprintln!("Safari address fill: ok={} verified={:?} failed={:?}; clipboard={:?}", filled.ok, filled.verified, filled.failed, agent.device().clipboard_read());
     let dismissed = agent.steps(&[Step::KeyboardDismiss]);
     assert!(dismissed.ok, "Safari keyboard dismiss failed: {:?}", dismissed.failed);
     assert!(filled.ok && filled.verified == [true], "Safari address-bar fill was not verified: {:?}, {:?}", filled.failed, filled.verified);

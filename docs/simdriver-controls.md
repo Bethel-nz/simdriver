@@ -69,5 +69,5 @@ The Node package also exports `listDevices()`, `listApps(udid)`, `boot(udid)`, a
 ## Boundaries
 
 - Biometric controls are not implemented. Device orientation was investigated but is not exposed. Three-or-more-finger gestures are not supported.
-- `fill` verifies the resulting accessibility value and can report a mismatch or an unobserved commit. On the tested runtime, fill did not verify in Settings Search or Safari’s address bar; those cases remain a live-runtime gap.
+- `fill` verifies the resulting accessibility value and can report a mismatch or an unobserved commit. On Xcode 27.1, Unicode text written with `simctl pbcopy` appeared in `simctl pbpaste` but did not paste into either Settings Search or Safari’s address field; `fill` returned `verified: false`. App-originated copy/paste and ASCII HID typing worked. In Safari, send `cmd+l` before the snapshot to expose and focus its address field. Similar simulator pasteboard synchronization failures have been [reported on Apple Developer Forums](https://developer.apple.com/forums/thread/820393) and [here](https://developer.apple.com/forums/thread/820644).
 - `clearAppData` deletes saved app data. Use it only when that reset is intended.
