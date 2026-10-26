@@ -12,8 +12,8 @@
     "helpers"
   ],
   "scripts": {
-    "build:debug": "napi build --platform --no-js && node scripts/copy-helpers.js",
-    "build": "napi build --platform --release --no-js && node scripts/copy-helpers.js",
+    "build:debug": "napi build --platform --no-js --dts native.d.ts && node scripts/copy-helpers.js",
+    "build": "napi build --platform --release --no-js --dts native.d.ts && node scripts/copy-helpers.js",
     "test": "bun test --timeout 30000",
     "test:node": "node --import tsx test/node.test.mjs"
   },
