@@ -59,7 +59,7 @@ driver.pointer('down', 0.5, 0.5);
 driver.pointer('up', 0.5, 0.5);
 
 // The agent layer, same package:
-const agent = new Agent(driver);
+const agent = driver.agent();
 const snap = await agent.snapshot();
 console.log(snap.text);                 // "e1 button \"General\" …"
 const report = await agent.steps([

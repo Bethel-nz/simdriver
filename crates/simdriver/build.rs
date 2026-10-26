@@ -6,11 +6,11 @@ const CORE_SIMULATOR: &str =
 
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let helpers = manifest.join("../../helpers");
+    let helpers = manifest.join("helpers");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("helpers");
     std::fs::create_dir_all(&out).unwrap();
 
-    println!("cargo:rerun-if-changed=../../helpers");
+    println!("cargo:rerun-if-changed=helpers");
     println!(
         "cargo:rustc-env=SIMDRIVER_BAKED_HELPER_DIR={}",
         out.display()

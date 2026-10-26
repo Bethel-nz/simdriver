@@ -4,4 +4,9 @@ node_modules/
 *.node
 bindings/node/helpers/
 bindings/node/native.d.ts
+bindings/node/LICENSE
+bindings/node/NOTICE
+bindings/node/THIRD-PARTY-LICENSE
+bindings/node/README.md
+bindings/node/simdriver-controls.md
 docs/superpowers/

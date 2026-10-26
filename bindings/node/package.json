@@ -9,9 +9,14 @@
     "index.js",
     "index.d.ts",
     "*.node",
-    "helpers"
+    "helpers",
+    "LICENSE",
+    "NOTICE",
+    "THIRD-PARTY-LICENSE",
+    "simdriver-controls.md"
   ],
   "scripts": {
+    "prepack": "node scripts/prepare-package.js",
     "build:debug": "napi build --platform --no-js --dts native.d.ts && node scripts/copy-helpers.js",
     "build": "napi build --platform --release --no-js --dts native.d.ts && node scripts/copy-helpers.js",
     "test": "bun test --timeout 30000",
@@ -23,5 +28,21 @@
   },
   "napi": {
     "name": "simdriver"
-  }
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "ios",
+    "simulator",
+    "automation",
+    "macos",
+    "electron"
+  ]
 }

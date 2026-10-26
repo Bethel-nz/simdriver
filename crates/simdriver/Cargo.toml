@@ -1,9 +1,13 @@
 [package]
 name = "simdriver"
+description = "Native iOS simulator frames, input, device controls, and accessibility for macOS"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 build = "build.rs"
+readme = "../../README.md"
+keywords = ["ios", "simulator", "automation", "macos"]
+categories = ["development-tools::testing"]
 
 [lib]
 crate-type = ["rlib", "cdylib", "staticlib"]
