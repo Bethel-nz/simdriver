@@ -1,6 +1,6 @@
 {
   "name": "simdriver",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Embed a live iOS simulator in your app: frames + touch input (Node, Bun, Electron main)",
   "license": "MIT",
   "main": "index.js",
