@@ -12,6 +12,7 @@
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::Env;
+use simdriver_agent as agent;
 use simdriver_core as sd;
 
 #[macro_use]
@@ -71,6 +72,124 @@ impl Task for AxTask {
 
   fn resolve(&mut self, _env: Env, json: String) -> Result<String> {
     Ok(json)
+  }
+}
+
+type CoreAgent = agent::Agent<Arc<sd::Driver>>;
+
+fn agent_err(e: agent::AgentError) -> Error {
+  Error::new(Status::GenericFailure, e.to_string())
+}
+
+#[napi(object)]
+pub struct JsSnapshot {
+  /// The snapshot without its image, as JSON (index.js parses it).
+  pub json: String,
+  pub image: Option<Buffer>,
+}
+
+pub struct SnapshotTask {
+  agent: Arc<CoreAgent>,
+  opts: agent::SnapshotOptions,
+}
+
+impl Task for SnapshotTask {
+  type Output = agent::Snapshot;
+  type JsValue = JsSnapshot;
+
+  fn compute(&mut self) -> Result<agent::Snapshot> {
+    self.agent.snapshot(&self.opts).map_err(agent_err)
+  }
+
+  fn resolve(&mut self, _env: Env, s: agent::Snapshot) -> Result<JsSnapshot> {
+    let json = serde_json::to_string(&s).map_err(|e| Error::from_reason(e.to_string()))?;
+    Ok(JsSnapshot { json, image: s.image.map(Buffer::from) })
+  }
+}
+
+pub struct TapTask {
+  agent: Arc<CoreAgent>,
+  target: String,
+  expect: Option<String>,
+}
+
+impl Task for TapTask {
+  type Output = String;
+  type JsValue = String;
+
+  fn compute(&mut self) -> Result<String> {
+    let t = self.agent.tap(&self.target, self.expect.as_deref()).map_err(agent_err)?;
+    serde_json::to_string(&t).map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  fn resolve(&mut self, _env: Env, json: String) -> Result<String> {
+    Ok(json)
+  }
+}
+
+pub struct StepsTask {
+  agent: Arc<CoreAgent>,
+  steps: Vec<agent::Step>,
+}
+
+impl Task for StepsTask {
+  type Output = String;
+  type JsValue = String;
+
+  fn compute(&mut self) -> Result<String> {
+    let r = self.agent.steps(&self.steps);
+    serde_json::to_string(&r).map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  fn resolve(&mut self, _env: Env, json: String) -> Result<String> {
+    Ok(json)
+  }
+}
+
+/// The agent layer over one driver: element refs, annotated screenshots, validated taps,
+/// steps. Every call runs off the JS thread.
+#[napi(js_name = "Agent")]
+pub struct JsAgent {
+  inner: Arc<CoreAgent>,
+}
+
+#[napi]
+impl JsAgent {
+  #[napi(constructor)]
+  pub fn new(driver: &Driver) -> JsAgent {
+    JsAgent { inner: Arc::new(agent::Agent::new(driver.core.clone())) }
+  }
+
+  /// `settleMs`, `image`, `grid`, `cols` (all optional).
+  #[napi(ts_return_type = "Promise<JsSnapshot>")]
+  pub fn snapshot(
+    &self,
+    settle_ms: Option<u32>,
+    image: Option<bool>,
+    grid: Option<bool>,
+    cols: Option<u32>,
+  ) -> AsyncTask<SnapshotTask> {
+    let d = agent::SnapshotOptions::default();
+    let opts = agent::SnapshotOptions {
+      settle: settle_ms.map_or(d.settle, |ms| std::time::Duration::from_millis(ms.into())),
+      image: image.unwrap_or(d.image),
+      grid: grid.unwrap_or(d.grid),
+      cols: cols.unwrap_or(d.cols),
+    };
+    AsyncTask::new(SnapshotTask { agent: self.inner.clone(), opts })
+  }
+
+  #[napi(ts_return_type = "Promise<string>")]
+  pub fn tap(&self, target: String, expect: Option<String>) -> AsyncTask<TapTask> {
+    AsyncTask::new(TapTask { agent: self.inner.clone(), target, expect })
+  }
+
+  /// `steps`: a JSON array of steps (index.js stringifies).
+  #[napi(ts_return_type = "Promise<string>")]
+  pub fn steps(&self, steps: String) -> Result<AsyncTask<StepsTask>> {
+    let steps: Vec<agent::Step> =
+      serde_json::from_str(&steps).map_err(|e| Error::new(Status::InvalidArg, format!("steps: {e}")))?;
+    Ok(AsyncTask::new(StepsTask { agent: self.inner.clone(), steps }))
   }
 }
 

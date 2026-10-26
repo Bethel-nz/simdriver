@@ -51,7 +51,8 @@ describe('simdriver', () => {
     expect(g.name(2, 3)).toBe('C4');
     const c = g.center('c4');
     expect(c !== null && g.at(c.x, c.y) === 'C4').toBe(true);
-    expect(g.center('N1')).toBe(null);
+    expect(g.center('O1')).toBe(null);
+    expect(g.center('E1')).toBe(null);
   });
 
   test('Driver.start({}) accepts missing options (no null reaches napi)', async () => {
@@ -98,6 +99,20 @@ describe('simdriver', () => {
 
     const pts = driver.screenPoints();
     expect(pts !== null && pts.width > 0 && pts.height > pts.width).toBe(true);
+
+    const agent = driver.agent();
+    expect(agent).toBe(driver.agent());
+    const snap = await agent.snapshot({ settleMs: 3000 });
+    expect(snap.id).toBe(1);
+    expect(typeof snap.text).toBe('string');
+    expect(snap.image === null || snap.image.subarray(1, 4).toString() === 'PNG').toBe(true);
+    let code = '';
+    try {
+      await agent.tap('e999999');
+    } catch (e) {
+      code = (e as { code?: string }).code ?? '';
+    }
+    expect(code).toBe('not-found');
 
     const root = await driver.accessibility();
     expect(root.role).toBe('AXApplication');

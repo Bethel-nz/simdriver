@@ -24,8 +24,50 @@ const modifiers = (mods) => ({
   meta: Boolean(mods?.meta),
 });
 
+// Agent refusals arrive as "code: message"; expose the code for hosts to branch on.
+const agentError = (e) => {
+  const m = /^(stale|covered|not-found|not-ready|invalid|device): /.exec(e?.message ?? '');
+  if (m) e.code = m[1];
+  return e;
+};
+
+class Agent {
+  #n;
+
+  constructor(nativeAgent) {
+    this.#n = nativeAgent;
+  }
+
+  async snapshot(opts = {}) {
+    try {
+      const r = await this.#n.snapshot(
+        opts.settleMs ?? undefined,
+        opts.image ?? undefined,
+        opts.grid ?? undefined,
+        opts.cols ?? undefined,
+      );
+      return { ...JSON.parse(r.json), image: r.image ?? null };
+    } catch (e) {
+      throw agentError(e);
+    }
+  }
+
+  async tap(target, opts = {}) {
+    try {
+      return JSON.parse(await this.#n.tap(target, opts.expect ?? undefined));
+    } catch (e) {
+      throw agentError(e);
+    }
+  }
+
+  async steps(steps) {
+    return JSON.parse(await this.#n.steps(JSON.stringify(steps)));
+  }
+}
+
 class Driver {
   #n;
+  #agent;
 
   constructor(nativeDriver) {
     this.#n = nativeDriver;
@@ -99,6 +141,12 @@ class Driver {
 
   tap(x, y) {
     this.#n.tap(x, y);
+  }
+
+  /** The agent layer for this driver (one per driver: refs carry across calls). */
+  agent() {
+    this.#agent ??= new Agent(new native.Agent(this.#n));
+    return this.#agent;
   }
 
   /** The frontmost app's accessibility tree (frames in screen points). */

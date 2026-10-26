@@ -1,0 +1,12 @@
+[package]
+name = "simdriver-agent"
+description = "Agent layer over simdriver: element refs, annotated screenshots, validated taps, multi-step flows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+simdriver = { path = "../simdriver" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+png = "0.18"
