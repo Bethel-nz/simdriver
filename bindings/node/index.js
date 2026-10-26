@@ -145,6 +145,10 @@ class Driver {
     this.#n.tap(x, y);
   }
 
+  doubleTap(x, y) {
+    this.#n.doubleTap(x, y);
+  }
+
   /** The agent layer for this driver (one per driver: refs carry across calls). */
   agent() {
     this.#agent ??= new Agent(new native.Agent(this.#n));

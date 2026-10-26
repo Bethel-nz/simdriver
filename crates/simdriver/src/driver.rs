@@ -817,6 +817,13 @@ impl Driver {
         self.pointer(Phase::Up, x, y, Modifiers::default());
     }
 
+    /// Tap twice at (`x`, `y`) with a short pause so iOS recognizes a double tap.
+    pub fn double_tap(&self, x: f64, y: f64) {
+        self.tap(x, y);
+        thread::sleep(Duration::from_millis(100));
+        self.tap(x, y);
+    }
+
     /// Press at (`x`, `y`), normalized 0..1 inside the box, hold for `hold`, then lift —
     /// iOS's long press (context menus, rearrange mode). The hold sleeps on the calling
     /// thread; the driver keeps serving input from other threads meanwhile.
@@ -1361,6 +1368,20 @@ mod tests {
         assert_eq!(got[3], touch(Phase::Move, 196.5, 426.0));
         assert_eq!(got[4], touch(Phase::Move, 294.75, 426.0));
         assert_eq!(got[5], touch(Phase::Up, 294.75, 426.0));
+    }
+
+    #[test]
+    fn double_tap_emits_two_taps_at_the_same_point() {
+        let rig = Rig::new("double-tap", true);
+        let log = Log::default();
+        let d = rig.start("fake-double-tap", &log).unwrap();
+        log.wait_state(State::Live, 1);
+        d.double_tap(0.25, 0.5);
+        let touch = |phase| HidCmd::Touch { phase, x: 98.25, y: 426.0, edge: crate::protocol::Edge::None }.to_line();
+        assert_eq!(
+            rig.wait_hid_log(4),
+            vec![touch(Phase::Down), touch(Phase::Up), touch(Phase::Down), touch(Phase::Up)]
+        );
     }
 
     #[test]

@@ -54,6 +54,11 @@ void sd_touch2(struct sd_driver *d, int32_t phase_code, double x1, double y1, do
 void sd_tap(struct sd_driver *d, double x, double y);
 
 /**
+ * Tap twice at (x, y), each 0..1 in the box, with a short pause for iOS double-tap recognition.
+ */
+void sd_double_tap(struct sd_driver *d, double x, double y);
+
+/**
  * Press at (x, y), hold for `hold_secs`, then lift — iOS's long press (context menus).
  */
 void sd_long_press(struct sd_driver *d, double x, double y, double hold_secs);

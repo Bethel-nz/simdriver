@@ -15,6 +15,7 @@ export type JsAgent = Agent
 
 export type AgentStep =
   | { action: 'tap'; target: string }
+  | { action: 'doubleTap'; target: string }
   | { action: 'longPress'; target: string; ms?: number }
   | { action: 'drag'; from: string; to: string; sourceHoldMs?: number; moveMs?: number; destinationHoldMs?: number }
   | { action: 'pinch'; target?: string; scale: number }
@@ -74,6 +75,7 @@ export declare class Driver {
   pointer(phaseStr: string, x: number, y: number, mods: JsModifiers): void
   scroll(phaseStr: string, x: number, y: number, dx: number, dy: number): void
   tap(x: number, y: number): void
+  doubleTap(x: number, y: number): void
   accessibility(): Promise<string>
   touch2(phaseStr: string, x1: number, y1: number, x2: number, y2: number): void
   screenPoints(): JsSize | null

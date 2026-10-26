@@ -579,6 +579,11 @@ impl Driver {
     self.core.tap(x, y);
   }
 
+  #[napi]
+  pub fn double_tap(&self, x: f64, y: f64) {
+    self.core.double_tap(x, y);
+  }
+
   /// Press at (x, y), hold for `ms`, then lift — iOS's long press.
   #[napi]
   pub fn long_press(&self, x: f64, y: f64, ms: Option<f64>) {

@@ -60,6 +60,7 @@ int main(void) {
     }
     sd_text(NULL, "hi");
     sd_tap(NULL, 0.5, 0.5);
+    sd_double_tap(NULL, 0.5, 0.5);
     sd_long_press(NULL, 0.5, 0.5, 0.8f);
     sd_drag(NULL, 0.2, 0.5, 0.8, 0.5, 0.3f, 0.6f);
     if (sd_accessibility_json(NULL) != NULL) {

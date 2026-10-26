@@ -18,6 +18,8 @@ pub enum Step {
     /// `target`: an element ref from the last snapshot (`e4`), a label or identifier on
     /// the current screen (`"Log in"`), or a grid cell (`C4`).
     Tap { target: String },
+    /// Double tap a validated element ref, label, identifier, or grid cell.
+    DoubleTap { target: String },
     /// Drag from one target to another (reorder handles, sliders): `from` and `to` are
     /// refs, labels, or grid cells, resolved like `tap` resolves. The touch holds ~300 ms
     /// before moving (so iOS sees a drag, not a scroll), then moves over `ms` (default 600).

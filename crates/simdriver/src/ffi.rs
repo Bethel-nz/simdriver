@@ -279,6 +279,15 @@ pub unsafe extern "C" fn sd_tap(d: *mut sd_driver, x: f64, y: f64) {
     let _ = guarded(AssertUnwindSafe(|| d.driver.tap(x, y)));
 }
 
+/// Tap twice at (x, y), each 0..1 in the box, with a short pause for iOS double-tap recognition.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_double_tap(d: *mut sd_driver, x: f64, y: f64) {
+    clear_error();
+    if d.is_null() { return; }
+    let d = unsafe { &*d };
+    let _ = guarded(AssertUnwindSafe(|| d.driver.double_tap(x, y)));
+}
+
 /// Press at (x, y), hold for `hold_secs`, then lift — iOS's long press (context menus).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sd_long_press(d: *mut sd_driver, x: f64, y: f64, hold_secs: f64) {

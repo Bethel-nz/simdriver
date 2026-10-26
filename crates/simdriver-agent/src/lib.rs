@@ -64,6 +64,12 @@ pub trait Device: Send + Sync {
     fn capture(&self, wait: Duration) -> Option<Frame>;
     /// A tap at (x, y) in 0..1 of the screen.
     fn tap(&self, x: f64, y: f64);
+    /// Two taps at (x, y) in 0..1 of the screen.
+    fn double_tap(&self, x: f64, y: f64) {
+        self.tap(x, y);
+        std::thread::sleep(Duration::from_millis(100));
+        self.tap(x, y);
+    }
     /// Press at (x, y) in 0..1 of the screen, hold for `hold`, then lift.
     fn long_press(&self, x: f64, y: f64, hold: Duration);
     /// One finger from `from` to `to` (0..1 of the screen) over `duration`.
@@ -169,6 +175,9 @@ impl Device for Driver {
     fn tap(&self, x: f64, y: f64) {
         Driver::tap(self, x, y)
     }
+    fn double_tap(&self, x: f64, y: f64) {
+        Driver::double_tap(self, x, y)
+    }
     fn long_press(&self, x: f64, y: f64, hold: Duration) {
         Driver::long_press(self, x, y, hold)
     }
@@ -226,6 +235,9 @@ impl<D: Device + ?Sized> Device for Arc<D> {
     }
     fn tap(&self, x: f64, y: f64) {
         (**self).tap(x, y)
+    }
+    fn double_tap(&self, x: f64, y: f64) {
+        (**self).double_tap(x, y)
     }
     fn long_press(&self, x: f64, y: f64, hold: Duration) {
         (**self).long_press(x, y, hold)
@@ -666,10 +678,15 @@ impl<D: Device> Agent<D> {
     pub fn tap(&self, target: &str, expect: Option<&str>) -> Result<Tapped, AgentError> {
         let screen = self.screen()?;
         if is_ref(target) {
-            return self.tap_ref(&target.to_ascii_lowercase(), expect, screen, None);
+            return self.tap_ref(&target.to_ascii_lowercase(), expect, screen, None, false);
         }
         let cols = lock(&self.last).as_ref().map_or(Grid::DEFAULT_COLS, |s| s.grid.cols);
-        self.tap_cell(target, screen, None, cols)
+        self.tap_cell(target, screen, None, cols, false)
+    }
+
+    /// Double tap a ref from the last snapshot, a current label, or a grid cell.
+    pub fn double_tap(&self, target: &str) -> Result<Tapped, AgentError> {
+        self.act_on_mode(target, false, None, true)
     }
 
     fn tap_ref(
@@ -678,6 +695,7 @@ impl<D: Device> Agent<D> {
         expect: Option<&str>,
         screen: (f64, f64),
         hold: Option<Duration>,
+        double: bool,
     ) -> Result<Tapped, AgentError> {
         let last = lock(&self.last)
             .clone()
@@ -717,7 +735,7 @@ impl<D: Device> Agent<D> {
             )));
         }
         let now = now.clone();
-        self.touch(target, &now, root, screen, hold)
+        self.touch(target, &now, root, screen, hold, double)
     }
 
     /// Touch the element: a tap, or with `hold` a long press (iOS context menus).
@@ -728,6 +746,7 @@ impl<D: Device> Agent<D> {
         root: AxNode,
         screen: (f64, f64),
         hold: Option<Duration>,
+        double: bool,
     ) -> Result<Tapped, AgentError> {
         let p = el.tap.ok_or_else(|| {
             AgentError::Covered(format!("{target} {:?} is covered by another element", el.name()))
@@ -736,19 +755,21 @@ impl<D: Device> Agent<D> {
         let at = (p[0] / screen.0, p[1] / screen.1);
         match hold {
             Some(h) => self.device.long_press(at.0, at.1, h),
+            None if double => self.device.double_tap(at.0, at.1),
             None => self.device.tap(at.0, at.1),
         }
         Ok(Tapped { target: target.to_string(), name: el.name().to_string(), at: p })
     }
 
     /// Touch a grid cell's centre: a tap, or with `hold` a long press.
-    fn tap_cell(&self, target: &str, screen: (f64, f64), hold: Option<Duration>, cols: u32) -> Result<Tapped, AgentError> {
+    fn tap_cell(&self, target: &str, screen: (f64, f64), hold: Option<Duration>, cols: u32, double: bool) -> Result<Tapped, AgentError> {
         let (x, y) = Grid::new(screen, cols).center(target).ok_or_else(|| {
             AgentError::NotFound(format!("{target:?} is neither an element ref (e4) nor a grid cell (C4)"))
         })?;
         self.mark(None, screen, false);
         match hold {
             Some(h) => self.device.long_press(x, y, h),
+            None if double => self.device.double_tap(x, y),
             None => self.device.tap(x, y),
         }
         Ok(Tapped { target: target.to_string(), name: String::new(), at: [x * screen.0, y * screen.1] })
@@ -757,17 +778,21 @@ impl<D: Device> Agent<D> {
     /// Touch a ref, a label on the current (settled) screen, or a grid cell: a tap, or
     /// with `hold` a long press.
     fn act_on(&self, target: &str, text_input: bool, hold: Option<Duration>) -> Result<Tapped, AgentError> {
+        self.act_on_mode(target, text_input, hold, false)
+    }
+
+    fn act_on_mode(&self, target: &str, text_input: bool, hold: Option<Duration>, double: bool) -> Result<Tapped, AgentError> {
         if is_ref(target) {
             let screen = self.screen()?;
-            return self.tap_ref(&target.to_ascii_lowercase(), None, screen, hold);
+            return self.tap_ref(&target.to_ascii_lowercase(), None, screen, hold, double);
         }
         let screen = self.screen()?;
         let (root, els, _, _) = self.settled(screen, SnapshotOptions::default().settle)?;
         match self.find(&els, target, text_input) {
-            Some(el) => self.touch(target, &el.clone(), root, screen, hold),
+            Some(el) => self.touch(target, &el.clone(), root, screen, hold, double),
             None if Grid::new(screen, Grid::DEFAULT_COLS).center(target).is_some() => {
                 let cols = lock(&self.last).as_ref().map_or(Grid::DEFAULT_COLS, |s| s.grid.cols);
-                self.tap_cell(target, screen, hold, cols)
+                self.tap_cell(target, screen, hold, cols, double)
             }
             None => Err(AgentError::NotFound(format!("nothing on screen is called {target:?}"))),
         }
@@ -950,6 +975,7 @@ impl<D: Device> Agent<D> {
     fn run(&self, step: &Step) -> Result<(), AgentError> {
         match step {
             Step::Tap { target } => self.act_on(target, false, None).map(drop),
+            Step::DoubleTap { target } => self.act_on_mode(target, false, None, true).map(drop),
             Step::Fill { target, value, secret } => self.fill(target, value, *secret),
             Step::Scroll { direction, target } => {
                 let screen = self.screen()?;
@@ -1452,6 +1478,7 @@ mod tests {
     struct Fake {
         screen: Mutex<AxNode>,
         taps: Mutex<Vec<(f64, f64)>>,
+        double_taps: Mutex<Vec<(f64, f64)>>,
         long_presses: Mutex<Vec<(f64, f64, Duration)>>,
         typed: Mutex<Vec<String>>,
         swipes: Mutex<Vec<Swipe>>,
@@ -1470,6 +1497,7 @@ mod tests {
             Fake {
                 screen: Mutex::new(screen),
                 taps: Mutex::default(),
+                double_taps: Mutex::default(),
                 long_presses: Mutex::default(),
                 typed: Mutex::default(),
                 swipes: Mutex::default(),
@@ -1515,6 +1543,9 @@ mod tests {
             if let Some(f) = lock(&self.on_tap).as_ref() {
                 f(self, x, y);
             }
+        }
+        fn double_tap(&self, x: f64, y: f64) {
+            lock(&self.double_taps).push((x, y));
         }
         fn long_press(&self, x: f64, y: f64, hold: Duration) {
             lock(&self.long_presses).push((x, y, hold));
@@ -1994,6 +2025,22 @@ mod tests {
         // Covered and unknown targets refuse without touching.
         let r = a.steps(&[Step::LongPress { target: "e3".into(), ms: Some(10) }]);
         assert_eq!(r.failed.unwrap().error, "covered: e3 \"Passcode\" is covered by another element");
+    }
+
+    #[test]
+    fn double_tap_uses_a_validated_element_or_grid_cell() {
+        let a = Agent::new(Fake::new(settings()));
+        a.snapshot(&quick()).unwrap();
+        let r = a.steps(&serde_json::from_str::<Vec<Step>>(
+            r#"[{"action":"doubleTap","target":"General"},{"action":"doubleTap","target":"C4"}]"#,
+        ).unwrap());
+        assert!(r.ok, "{:?}", r.failed);
+        let got = lock(&a.device.double_taps).clone();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], (0.5, 225.0 / 800.0));
+        assert!((got[1].0 - 3.5 / 6.0).abs() < f64::EPSILON);
+        assert!((got[1].1 - 2.5 / 12.0).abs() < f64::EPSILON);
+        assert!(lock(&a.device.taps).is_empty());
     }
 
     #[test]
