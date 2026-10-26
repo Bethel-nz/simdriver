@@ -48,6 +48,33 @@ export interface Stats {
   frames: number;
 }
 
+/** One element of the accessibility tree. `frame` is [x, y, width, height] in screen points. */
+export interface AxNode {
+  role: string;
+  label?: string;
+  value?: string;
+  /** The app's accessibilityIdentifier, when set. */
+  id?: string;
+  enabled: boolean;
+  frame: [number, number, number, number];
+  children?: AxNode[];
+}
+
+/**
+ * A named grid over the screen for what accessibility does not expose: rows are letters
+ * down the screen (A, B, … then AA), columns numbers across. "C4" = row C, column 4.
+ * Coordinates are 0..1 of the screen, like `pointer`.
+ */
+export class Grid {
+  constructor(screenWidth: number, screenHeight: number, cols?: number);
+  readonly rows: number;
+  readonly cols: number;
+  name(row: number, col: number): string;
+  center(name: string): { x: number; y: number } | null;
+  rect(name: string): { x: number; y: number; width: number; height: number } | null;
+  at(x: number, y: number): string;
+}
+
 export interface Driver {
   readonly udid: string;
   readonly state: DriverState;
@@ -59,6 +86,16 @@ export interface Driver {
     dx: number,
     dy: number,
   ): void;
+  /** A pointer down and up at (x, y), 0..1 in the box. */
+  tap(x: number, y: number): void;
+  /**
+   * The frontmost app's accessibility tree, home screen included. The first call takes
+   * 1–2 s (the helper starts and the guest warms up); later ones tens of ms. Rejects on
+   * an Xcode without the private API it uses.
+   */
+  accessibility(): Promise<AxNode>;
+  /** A Grid over this device's screen, or null before input connects. */
+  grid(cols?: number): Grid | null;
   /** Two fingers placed exactly (rotation, off-centre pinch), each 0..1 in the box. */
   touch2(phase: 'down' | 'move' | 'up', x1: number, y1: number, x2: number, y2: number): void;
   /** The device screen in points (e.g. 402×874), once input is connected; else null. */

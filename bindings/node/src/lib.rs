@@ -50,8 +50,90 @@ impl Task for StartTask {
   }
 
   fn resolve(&mut self, _env: Env, core: sd::Driver) -> Result<Driver> {
-    Ok(Driver { core, pump: self.pump.clone() })
+    Ok(Driver { core: Arc::new(core), pump: self.pump.clone() })
   }
+}
+
+/// `driver.accessibility()` off the JS thread: a snapshot blocks (1–2 s the first time).
+/// Resolves to the tree as JSON; index.js parses it.
+pub struct AxTask {
+  core: Arc<sd::Driver>,
+}
+
+impl Task for AxTask {
+  type Output = String;
+  type JsValue = String;
+
+  fn compute(&mut self) -> Result<String> {
+    let root = self.core.accessibility().map_err(to_napi)?;
+    serde_json::to_string(&root).map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  fn resolve(&mut self, _env: Env, json: String) -> Result<String> {
+    Ok(json)
+  }
+}
+
+/// A named grid over a screen: rows lettered down (A, B, …), columns numbered across.
+#[napi(js_name = "Grid")]
+pub struct JsGrid {
+  inner: sd::Grid,
+}
+
+#[napi]
+impl JsGrid {
+  #[napi(constructor)]
+  pub fn new(screen_width: f64, screen_height: f64, cols: Option<u32>) -> JsGrid {
+    JsGrid { inner: sd::Grid::new((screen_width, screen_height), cols.unwrap_or(sd::Grid::DEFAULT_COLS)) }
+  }
+
+  #[napi(getter)]
+  pub fn rows(&self) -> u32 {
+    self.inner.rows
+  }
+
+  #[napi(getter)]
+  pub fn cols(&self) -> u32 {
+    self.inner.cols
+  }
+
+  /// Name of the cell at `row`, `col` (from 0), e.g. (2, 3) → "C4".
+  #[napi]
+  pub fn name(&self, row: u32, col: u32) -> String {
+    self.inner.name(row, col)
+  }
+
+  /// Centre of a named cell in 0..1 of the screen, or null outside the grid.
+  #[napi]
+  pub fn center(&self, name: String) -> Option<JsPoint> {
+    self.inner.center(&name).map(|(x, y)| JsPoint { x, y })
+  }
+
+  /// A named cell as {x, y, width, height} in 0..1 of the screen, or null.
+  #[napi]
+  pub fn rect(&self, name: String) -> Option<JsRect> {
+    self.inner.rect(&name).map(|[x, y, width, height]| JsRect { x, y, width, height })
+  }
+
+  /// Name of the cell containing (x, y) in 0..1 of the screen.
+  #[napi]
+  pub fn at(&self, x: f64, y: f64) -> String {
+    self.inner.at(x, y)
+  }
+}
+
+#[napi(object)]
+pub struct JsPoint {
+  pub x: f64,
+  pub y: f64,
+}
+
+#[napi(object)]
+pub struct JsRect {
+  pub x: f64,
+  pub y: f64,
+  pub width: f64,
+  pub height: f64,
 }
 
 #[napi(object)]
@@ -204,7 +286,7 @@ impl Pump {
 
 #[napi]
 pub struct Driver {
-  core: sd::Driver,
+  core: Arc<sd::Driver>,
   pump: Arc<Pump>,
 }
 
@@ -355,6 +437,16 @@ impl Driver {
     let p = scroll_phase(&phase_str)?;
     self.core.scroll(p, x, y, dx, dy);
     Ok(())
+  }
+
+  #[napi]
+  pub fn tap(&self, x: f64, y: f64) {
+    self.core.tap(x, y);
+  }
+
+  #[napi(ts_return_type = "Promise<string>")]
+  pub fn accessibility(&self) -> AsyncTask<AxTask> {
+    AsyncTask::new(AxTask { core: self.core.clone() })
   }
 
   #[napi]

@@ -12,10 +12,12 @@
 //! Every event goes through one [`CallbackGate`]: once `stop` returns, `on_event` is not
 //! running and never will again, and the last event it saw was `State::Stopped`. `stop`
 //! from inside `on_event` does not wait for itself.
+use crate::ax::{Ax, AxNode};
 use crate::devices::{DeviceSelector, list_devices};
 use crate::error::Error;
 use crate::frames::FramePipeline;
 use crate::gesture::{Router, ScrollPhase};
+use crate::grid::Grid;
 use crate::helper::{CallbackGate, Supervised, helper_dir, lock};
 use crate::hid::{HidClient, HidEvent, QUEUE_CAP};
 use crate::protocol::{HidCmd, Phase};
@@ -258,6 +260,8 @@ struct Inner {
     udid: String,
     shared: Arc<Shared>,
     hid: HidClient,
+    /// Accessibility snapshots; sdax is spawned on the first one.
+    ax: Ax,
     input: Mutex<Input>,
     frame: Mutex<FrameSide>,
     frame_bin: PathBuf,
@@ -431,6 +435,7 @@ impl Inner {
         }
         // No event is being delivered on another thread, and none will start.
         self.shared.gate.close();
+        self.ax.stop();
         let _ = self.shared.tx.send(Msg::Stop);
         if let Some(h) = lock(&self.supervisor).take() {
             if h.thread().id() != thread::current().id() {
@@ -686,6 +691,8 @@ impl Driver {
         *lock(&shared.state) = State::Starting;
         shared.emit(Event::State(State::Starting));
         let hid_tx = tx;
+        // sdax sits next to sdhid; it is spawned on the first snapshot, not here.
+        let hid_bin = hid.0.clone();
         let hid = match HidClient::spawn(hid.0, hid.1, move |e| {
             let _ = hid_tx.send(Msg::Hid(e));
         }) {
@@ -704,6 +711,7 @@ impl Driver {
             })
         };
         let inner = Arc::new(Inner {
+            ax: Ax::new(hid_bin.with_file_name("sdax"), vec![udid.clone()]),
             udid,
             shared,
             hid,
@@ -772,6 +780,27 @@ impl Driver {
     /// point-accurate size.
     pub fn screen_points(&self) -> Option<(f64, f64)> {
         lock(&self.inner.input).screen
+    }
+
+    /// A tap at (`x`, `y`), normalized 0..1 inside the box: a pointer down and up.
+    pub fn tap(&self, x: f64, y: f64) {
+        self.pointer(Phase::Down, x, y, Modifiers::default());
+        self.pointer(Phase::Up, x, y, Modifiers::default());
+    }
+
+    /// The frontmost app's accessibility tree (system UI such as the home screen
+    /// included), frames in screen points. Blocks: the first call starts the `sdax`
+    /// helper and takes 1–2 s while the guest warms up; later calls take tens of ms.
+    /// Fails with `Error::Unsupported` on an Xcode without the private API it uses.
+    /// Web content inside Safari shows up only as an opaque element.
+    pub fn accessibility(&self) -> Result<AxNode, Error> {
+        self.inner.ax.snapshot()
+    }
+
+    /// A [`Grid`] over this device's screen with `cols` columns, once input is
+    /// connected (the screen size comes from sdhid).
+    pub fn grid(&self, cols: u32) -> Option<Grid> {
+        self.screen_points().map(|s| Grid::new(s, cols))
     }
 
     /// Press and release a named key (enter/return, escape, backspace, tab, space, delete,
@@ -1191,6 +1220,27 @@ mod tests {
             got,
             vec![touch(Phase::Down, 196.5, 426.0), touch(Phase::Down, 98.25, 213.0), touch(Phase::Up, 98.25, 213.0)]
         );
+    }
+
+    #[test]
+    fn accessibility_tap_and_grid() {
+        let rig = Rig::new("ax", true);
+        let log = Log::default();
+        let d = rig.start("fake-ax", &log).unwrap();
+        log.wait_state(State::Live, 1);
+        // The real sdax would sit next to the fake sdhid; point it at the fake one.
+        d.inner.ax.set_helper(fake_helper(), vec!["ax".into()]);
+        let root = d.accessibility().unwrap();
+        let button = root.descendants().into_iter().find(|n| n.role == "AXButton").unwrap();
+        let (sw, sh) = d.screen_points().unwrap();
+        let (cx, cy) = button.center();
+        d.tap(cx / sw, cy / sh);
+        let touch = |p, x: f64, y: f64| HidCmd::Touch { phase: p, x, y, edge: crate::protocol::Edge::None }.to_line();
+        assert_eq!(rig.wait_hid_log(2), vec![touch(Phase::Down, 196.5, 725.0), touch(Phase::Up, 196.5, 725.0)]);
+        let g = d.grid(Grid::DEFAULT_COLS).unwrap();
+        assert_eq!(g, Grid { rows: 13, cols: 6 });
+        d.stop();
+        assert!(matches!(d.accessibility(), Err(Error::Accessibility(_))));
     }
 
     #[test]

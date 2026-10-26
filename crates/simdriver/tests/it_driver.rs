@@ -433,3 +433,54 @@ fn it_survives_sim_reboot() {
         rec.states()
     );
 }
+
+/// The accessibility path end to end: find Settings' "General" row by label, tap its
+/// centre through the HID path, and see the General page in the next snapshots.
+#[test]
+fn it_accessibility_finds_and_taps() {
+    let Some(udid) = support::booted_udid() else { return };
+    if !support::input_allowed(&udid) {
+        return;
+    }
+    let _ = Command::new("xcrun").args(["simctl", "terminate", &udid, "com.apple.Preferences"]).status();
+    let ok = Command::new("xcrun").args(["simctl", "launch", &udid, "com.apple.Preferences"]).status();
+    assert!(ok.is_ok_and(|s| s.success()), "could not launch Settings");
+    let rec = Rec::default();
+    let d = start(&udid, &rec);
+    rec.wait_state(0, State::Live, LIVE_WAIT);
+    let labelled = |root: &simdriver::AxNode, role: &str, label: &str| {
+        root.descendants().into_iter().find(|n| n.role == role && n.label.as_deref() == Some(label)).cloned()
+    };
+    let t0 = Instant::now();
+    let general = loop {
+        let root = d.accessibility().unwrap_or_else(|e| panic!("snapshot: {e}"));
+        if let Some(n) = labelled(&root, "AXButton", "General") {
+            break n;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(20), "Settings never showed a General row");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let mut warm = Vec::new();
+    for _ in 0..5 {
+        let t = Instant::now();
+        d.accessibility().unwrap();
+        warm.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    warm.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    eprintln!("warm snapshots (ms): {warm:?}");
+    assert!(warm[2] < 500.0, "median warm snapshot {:.1} ms", warm[2]);
+
+    let (sw, sh) = d.screen_points().unwrap();
+    let (cx, cy) = general.center();
+    d.tap(cx / sw, cy / sh);
+    let t0 = Instant::now();
+    loop {
+        let root = d.accessibility().unwrap();
+        if labelled(&root, "AXButton", "About").is_some() {
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(10), "the General page never appeared");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    d.stop();
+}

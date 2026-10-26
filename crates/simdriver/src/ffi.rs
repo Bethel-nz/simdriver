@@ -11,6 +11,7 @@
 use crate::devices::DeviceSelector;
 use crate::driver::{Button as DriverButton, Driver, Event, Modifiers, Options, State};
 use crate::gesture::ScrollPhase;
+use crate::grid::Grid;
 use crate::protocol::Phase;
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
@@ -259,6 +260,91 @@ pub unsafe extern "C" fn sd_touch2(d: *mut sd_driver, phase_code: i32, x1: f64, 
             d.driver.touch2(p, x1, y1, x2, y2);
         }
     }));
+}
+
+/// A tap at (x, y), each 0..1 in the box: a pointer down and up.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_tap(d: *mut sd_driver, x: f64, y: f64) {
+    clear_error();
+    if d.is_null() { return; }
+    let d = unsafe { &*d };
+    let _ = guarded(AssertUnwindSafe(|| d.driver.tap(x, y)));
+}
+
+/// The frontmost app's accessibility tree as JSON (one node: `role`, `label`?, `value`?,
+/// `id`?, `enabled`, `frame` [x,y,w,h] in screen points, `children`?). Blocks; the first
+/// call takes 1–2 s. Returns NULL on failure (see `sd_last_error`); free the result
+/// with `sd_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_accessibility_json(d: *mut sd_driver) -> *mut c_char {
+    clear_error();
+    if d.is_null() {
+        set_error("d is NULL");
+        return std::ptr::null_mut();
+    }
+    let d = unsafe { &*d };
+    let run = || -> Result<CString, String> {
+        let root = d.driver.accessibility().map_err(|e| e.to_string())?;
+        let json = serde_json::to_string(&root).map_err(|e| e.to_string())?;
+        CString::new(json).map_err(|_| "snapshot JSON contained a NUL byte".to_string())
+    };
+    match catch_unwind(AssertUnwindSafe(run)) {
+        Ok(Ok(s)) => s.into_raw(),
+        Ok(Err(e)) => {
+            set_error(e);
+            std::ptr::null_mut()
+        }
+        Err(p) => {
+            set_error(format!("panic in sd_accessibility_json: {}", panic_text(p)));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Frees a string returned by simdriver. NULL-safe.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_string_free(s: *mut c_char) {
+    clear_error();
+    if !s.is_null() {
+        drop(unsafe { CString::from_raw(s) });
+    }
+}
+
+/// Rows of the grid with `cols` columns over a `screen_w`×`screen_h` point screen.
+#[unsafe(no_mangle)]
+pub extern "C" fn sd_grid_rows(screen_w: f64, screen_h: f64, cols: u32) -> u32 {
+    clear_error();
+    Grid::new((screen_w, screen_h), cols).rows
+}
+
+/// Centre of grid cell `name` (e.g. "C4": row C, column 4) in 0..1 of the screen,
+/// written to `*x` and `*y`. False (nothing written) for a name outside the grid or a
+/// NULL argument.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_grid_cell(
+    screen_w: f64,
+    screen_h: f64,
+    cols: u32,
+    name: *const c_char,
+    x: *mut f64,
+    y: *mut f64,
+) -> bool {
+    clear_error();
+    if x.is_null() || y.is_null() { return false; }
+    let name = match utf8(name, "name") {
+        Ok(n) => n,
+        Err(e) => {
+            set_error(e);
+            return false;
+        }
+    };
+    match Grid::new((screen_w, screen_h), cols).center(name) {
+        Some((cx, cy)) => {
+            unsafe { *x = cx; *y = cy; }
+            true
+        }
+        None => false,
+    }
 }
 
 /// The device screen in points, written to `*w` and `*h`. Returns false (and writes

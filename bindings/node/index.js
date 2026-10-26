@@ -97,6 +97,21 @@ class Driver {
     this.#n.scroll(phase, x, y, dx, dy);
   }
 
+  tap(x, y) {
+    this.#n.tap(x, y);
+  }
+
+  /** The frontmost app's accessibility tree (frames in screen points). */
+  async accessibility() {
+    return JSON.parse(await this.#n.accessibility());
+  }
+
+  /** A Grid over this screen (`cols` columns, default 6), or null before input connects. */
+  grid(cols) {
+    const s = this.#n.screenPoints();
+    return s ? new native.Grid(s.width, s.height, cols ?? undefined) : null;
+  }
+
   touch2(phase, x1, y1, x2, y2) {
     this.#n.touch2(phase, x1, y1, x2, y2);
   }
@@ -132,3 +147,4 @@ exports.listDevices = native.listDevices;
 exports.boot = native.boot;
 exports.shutdown = native.shutdown;
 exports.Driver = Driver;
+exports.Grid = native.Grid;

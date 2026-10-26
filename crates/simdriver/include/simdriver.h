@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define Grid_DEFAULT_COLS 6
+
 /**
  * The opaque handle: a started Driver plus the C callbacks it delivers to.
  */
@@ -45,6 +47,41 @@ void sd_scroll(struct sd_driver *d, int32_t phase_code, double x, double y, doub
  * `sd_pointer`. For rotation and off-centre pinches.
  */
 void sd_touch2(struct sd_driver *d, int32_t phase_code, double x1, double y1, double x2, double y2);
+
+/**
+ * A tap at (x, y), each 0..1 in the box: a pointer down and up.
+ */
+void sd_tap(struct sd_driver *d, double x, double y);
+
+/**
+ * The frontmost app's accessibility tree as JSON (one node: `role`, `label`?, `value`?,
+ * `id`?, `enabled`, `frame` [x,y,w,h] in screen points, `children`?). Blocks; the first
+ * call takes 1–2 s. Returns NULL on failure (see `sd_last_error`); free the result
+ * with `sd_string_free`.
+ */
+char *sd_accessibility_json(struct sd_driver *d);
+
+/**
+ * Frees a string returned by simdriver. NULL-safe.
+ */
+void sd_string_free(char *s);
+
+/**
+ * Rows of the grid with `cols` columns over a `screen_w`×`screen_h` point screen.
+ */
+uint32_t sd_grid_rows(double screen_w, double screen_h, uint32_t cols);
+
+/**
+ * Centre of grid cell `name` (e.g. "C4": row C, column 4) in 0..1 of the screen,
+ * written to `*x` and `*y`. False (nothing written) for a name outside the grid or a
+ * NULL argument.
+ */
+bool sd_grid_cell(double screen_w,
+                  double screen_h,
+                  uint32_t cols,
+                  const char *name,
+                  double *x,
+                  double *y);
 
 /**
  * The device screen in points, written to `*w` and `*h`. Returns false (and writes

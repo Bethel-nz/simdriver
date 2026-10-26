@@ -42,6 +42,18 @@ int main(void) {
         return 1;
     }
     sd_text(NULL, "hi");
+    sd_tap(NULL, 0.5, 0.5);
+    if (sd_accessibility_json(NULL) != NULL) {
+        fprintf(stderr, "sd_accessibility_json(NULL) must return NULL\n");
+        return 1;
+    }
+    sd_string_free(NULL);
+    double gx = 0, gy = 0;
+    if (sd_grid_rows(402, 874, 6) != 13 || !sd_grid_cell(402, 874, 6, "a1", &gx, &gy)
+        || gx != 1.0 / 12.0 || gy != 1.0 / 26.0 || sd_grid_cell(402, 874, 6, "N1", &gx, &gy)) {
+        fprintf(stderr, "grid: rows %u, A1 at (%f, %f)\n", sd_grid_rows(402, 874, 6), gx, gy);
+        return 1;
+    }
     sd_button(NULL, 0, 1, 0.0f);
 
     printf("smoke ok\n");

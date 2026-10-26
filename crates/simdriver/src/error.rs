@@ -9,6 +9,10 @@ pub enum Error {
     Spawn(String),
     Shm(String),
     Simctl(String),
+    /// This Xcode/macOS lacks a private API a feature needs (the text names it).
+    Unsupported(String),
+    /// An accessibility snapshot failed (no frontmost app, timed out, driver stopped).
+    Accessibility(String),
     Io(std::io::Error),
 }
 
@@ -21,6 +25,8 @@ impl fmt::Display for Error {
             Error::Spawn(s) => write!(f, "failed to spawn helper: {s}"),
             Error::Shm(s) => write!(f, "shared memory error: {s}"),
             Error::Simctl(s) => write!(f, "simctl error: {s}"),
+            Error::Unsupported(s) => write!(f, "unsupported on this Xcode: {s}"),
+            Error::Accessibility(s) => write!(f, "accessibility snapshot failed: {s}"),
             Error::Io(e) => write!(f, "io error: {e}"),
         }
     }

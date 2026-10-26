@@ -14,9 +14,10 @@ fn main() {
     println!("cargo:rustc-env=SIMDRIVER_BAKED_HELPER_DIR={}", out.display());
 
     // (name, extra frameworks)
-    let helper_specs: [(&str, &[&str]); 2] = [
+    let helper_specs: [(&str, &[&str]); 3] = [
         ("sdframe", &["CoreGraphics", "IOSurface", "Accelerate"]),
         ("sdhid", &["CoreGraphics"]),
+        ("sdax", &["AppKit"]),
     ];
     for (name, extra) in helper_specs {
         let tmp = out.join(format!("{name}.tmp"));

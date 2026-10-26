@@ -7,7 +7,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from './runner.ts';
-import { Driver, listDevices } from '../index.js';
+import { Driver, Grid, listDevices } from '../index.js';
 
 const IT = process.env.SIMDRIVER_IT === '1';
 const here = dirname(fileURLToPath(import.meta.url));
@@ -42,6 +42,16 @@ describe('simdriver', () => {
     for (const key of ['udid', 'name', 'state', 'deviceType', 'runtime']) {
       expect(key in devices[0]).toBeTruthy();
     }
+  });
+
+  test('Grid names cells and finds them again', () => {
+    const g = new Grid(402, 874);
+    expect(g.rows).toBe(13);
+    expect(g.cols).toBe(6);
+    expect(g.name(2, 3)).toBe('C4');
+    const c = g.center('c4');
+    expect(c !== null && g.at(c.x, c.y) === 'C4').toBe(true);
+    expect(g.center('N1')).toBe(null);
   });
 
   test('Driver.start({}) accepts missing options (no null reaches napi)', async () => {
@@ -88,6 +98,11 @@ describe('simdriver', () => {
 
     const pts = driver.screenPoints();
     expect(pts !== null && pts.width > 0 && pts.height > pts.width).toBe(true);
+
+    const root = await driver.accessibility();
+    expect(root.role).toBe('AXApplication');
+    expect(root.frame.length).toBe(4);
+    expect(driver.grid()?.rows).toBeGreaterThan(0);
 
     const stats = driver.stats();
     expect(stats.frames).toBeGreaterThanOrEqual(100);

@@ -18,6 +18,10 @@
 //!                      three frames in turn every 16 ms. `{"t":"_exit","code":N}` on stdin
 //!                      exits with N (stderr "fake_helper: exiting N"); stdin EOF exits 0.
 //!   stubborn           ignore SIGINT and stdin EOF; sleep until killed.
+//!   ax [unsupported|hang]  sdax stand-in: prints {"t":"ready"}, then answers each
+//!                      {"t":"snapshot","id":N} with a fixed two-node tree under id N.
+//!                      `unsupported`: print an error line and exit 4 at once; `hang`:
+//!                      never answer a snapshot.
 use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -44,6 +48,7 @@ fn main() {
             std::process::exit(args[1].parse().unwrap());
         }
         Some("frames") => frames(&args[1], &args[2], &args[3]),
+        Some("ax") => ax(args.get(1).map(String::as_str)),
         Some("stubborn") => {
             unsafe {
                 libc::signal(libc::SIGINT, libc::SIG_IGN);
@@ -134,5 +139,29 @@ fn hid(dir: PathBuf) {
         }
         writeln!(log, "{line}").unwrap();
         log.flush().unwrap();
+    }
+}
+
+fn ax(mode: Option<&str>) {
+    let mut out = std::io::stdout().lock();
+    if mode == Some("unsupported") {
+        writeln!(out, r#"{{"t":"error","detail":"AXPTranslator lacks frontmostApplicationWithDisplayId:bridgeDelegateToken:"}}"#).unwrap();
+        out.flush().unwrap();
+        std::process::exit(4);
+    }
+    writeln!(out, r#"{{"t":"ready"}}"#).unwrap();
+    out.flush().unwrap();
+    for line in std::io::stdin().lock().lines() {
+        let Ok(line) = line else { return };
+        if mode == Some("hang") || !line.contains(r#""t":"snapshot""#) {
+            continue;
+        }
+        let id = line.split(r#""id":"#).nth(1).and_then(|r| r.trim_end_matches('}').parse::<u64>().ok()).unwrap_or(0);
+        writeln!(
+            out,
+            r#"{{"t":"ax","id":{id},"ms":1.0,"requests":4,"root":{{"role":"AXApplication","label":"Fake","enabled":true,"frame":[0,0,393,852],"children":[{{"role":"AXButton","label":"Continue","id":"go","enabled":true,"frame":[20,700,353,50]}}]}}}}"#
+        )
+        .unwrap();
+        out.flush().unwrap();
     }
 }
