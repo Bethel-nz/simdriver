@@ -1461,7 +1461,7 @@ dependencies = [
 
 [[package]]
 name = "rust-minimal"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "simdriver",
  "softbuffer",
@@ -1625,7 +1625,7 @@ dependencies = [
 
 [[package]]
 name = "simdriver"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cbindgen",
  "libc",
@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "simdriver-agent"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "png",
  "serde",
@@ -1645,7 +1645,7 @@ dependencies = [
 
 [[package]]
 name = "simdriver-node"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "napi",
  "napi-build",

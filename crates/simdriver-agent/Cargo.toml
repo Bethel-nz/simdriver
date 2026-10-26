@@ -9,7 +9,7 @@ keywords = ["ios", "simulator", "automation", "agents"]
 categories = ["development-tools::testing"]
 
 [dependencies]
-simdriver = { path = "../simdriver", version = "0.1.1" }
+simdriver = { path = "../simdriver", version = "0.1.2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 png = "0.18"

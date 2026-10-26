@@ -5,4 +5,4 @@ members = ["crates/simdriver", "crates/simdriver-agent", "bindings/node", "examp
 [workspace.package]
 edition = "2024"
 license = "MIT"
-version = "0.1.1"
+version = "0.1.2"
