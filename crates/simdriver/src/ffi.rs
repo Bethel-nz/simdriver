@@ -85,10 +85,19 @@ fn guarded(f: impl FnOnce() + std::panic::UnwindSafe) -> Result<(), String> {
     catch_unwind(f).map_err(|e| panic_text(e))
 }
 
-fn device_result(result: Result<(), crate::error::Error>, operation: &str) -> bool {
-    match result {
-        Ok(()) => true,
-        Err(e) => { set_error(format!("{operation}: {e}")); false }
+/// Run a device call for `sd_<operation>`: an error or a panic becomes `false` plus the
+/// last error, so no panic unwinds into C.
+fn device_call(operation: &str, f: impl FnOnce() -> Result<(), crate::error::Error>) -> bool {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            set_error(format!("{operation}: {e}"));
+            false
+        }
+        Err(p) => {
+            set_error(format!("panic in sd_{operation}: {}", panic_text(p)));
+            false
+        }
     }
 }
 
@@ -443,7 +452,10 @@ pub unsafe extern "C" fn sd_key(d: *mut sd_driver, name: *const c_char) -> bool 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sd_key_combo(d: *mut sd_driver, combo: *const c_char) -> bool {
     clear_error();
-    if d.is_null() || combo.is_null() { return false; }
+    if d.is_null() || combo.is_null() {
+        set_error("driver or combo is NULL");
+        return false;
+    }
     let d = unsafe { &*d };
     let Ok(combo) = (unsafe { CStr::from_ptr(combo) }).to_str() else {
         set_error("key combo is not valid UTF-8");
@@ -463,7 +475,7 @@ pub unsafe extern "C" fn sd_open_url(d: *mut sd_driver, url: *const c_char) -> b
     clear_error();
     if d.is_null() { return false; }
     let d = unsafe { &*d };
-    match utf8(url, "url") { Ok(url) => device_result(d.driver.open_url(url), "open_url"), Err(e) => { set_error(e); false } }
+    match utf8(url, "url") { Ok(url) => device_call("open_url", || d.driver.open_url(url)), Err(e) => { set_error(e); false } }
 }
 
 #[unsafe(no_mangle)]
@@ -471,7 +483,7 @@ pub unsafe extern "C" fn sd_launch(d: *mut sd_driver, bundle_id: *const c_char) 
     clear_error();
     if d.is_null() { return false; }
     let d = unsafe { &*d };
-    match utf8(bundle_id, "bundle_id") { Ok(id) => device_result(d.driver.launch(id), "launch"), Err(e) => { set_error(e); false } }
+    match utf8(bundle_id, "bundle_id") { Ok(id) => device_call("launch", || d.driver.launch(id)), Err(e) => { set_error(e); false } }
 }
 
 #[unsafe(no_mangle)]
@@ -479,7 +491,7 @@ pub unsafe extern "C" fn sd_terminate(d: *mut sd_driver, bundle_id: *const c_cha
     clear_error();
     if d.is_null() { return false; }
     let d = unsafe { &*d };
-    match utf8(bundle_id, "bundle_id") { Ok(id) => device_result(d.driver.terminate(id), "terminate"), Err(e) => { set_error(e); false } }
+    match utf8(bundle_id, "bundle_id") { Ok(id) => device_call("terminate", || d.driver.terminate(id)), Err(e) => { set_error(e); false } }
 }
 
 #[unsafe(no_mangle)]
@@ -487,7 +499,7 @@ pub unsafe extern "C" fn sd_set_location(d: *mut sd_driver, lat: f64, lon: f64) 
     clear_error();
     if d.is_null() { return false; }
     let d = unsafe { &*d };
-    device_result(d.driver.set_location(lat, lon), "set_location")
+    device_call("set_location", || d.driver.set_location(lat, lon))
 }
 
 /// Appearance code: 0 = light, 1 = dark.
@@ -497,7 +509,7 @@ pub unsafe extern "C" fn sd_set_appearance(d: *mut sd_driver, appearance: i32) -
     if d.is_null() { return false; }
     let mode = match appearance { 0 => Appearance::Light, 1 => Appearance::Dark, _ => { set_error("appearance must be 0 (light) or 1 (dark)"); return false; } };
     let d = unsafe { &*d };
-    device_result(d.driver.set_appearance(mode), "set_appearance")
+    device_call("set_appearance", || d.driver.set_appearance(mode))
 }
 
 #[unsafe(no_mangle)]
@@ -507,7 +519,7 @@ pub unsafe extern "C" fn sd_grant_permission(d: *mut sd_driver, service: *const 
     let d = unsafe { &*d };
     let service = match utf8(service, "service") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
     let bundle_id = match utf8(bundle_id, "bundle_id") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
-    device_result(d.driver.grant_permission(service, bundle_id), "grant_permission")
+    device_call("grant_permission", || d.driver.grant_permission(service, bundle_id))
 }
 
 #[unsafe(no_mangle)]
@@ -515,7 +527,7 @@ pub unsafe extern "C" fn sd_clipboard_write(d: *mut sd_driver, text: *const c_ch
     clear_error();
     if d.is_null() { return false; }
     let d = unsafe { &*d };
-    match utf8(text, "text") { Ok(text) => device_result(d.driver.clipboard_write(text), "clipboard_write"), Err(e) => { set_error(e); false } }
+    match utf8(text, "text") { Ok(text) => device_call("clipboard_write", || d.driver.clipboard_write(text)), Err(e) => { set_error(e); false } }
 }
 
 #[unsafe(no_mangle)]
@@ -537,7 +549,7 @@ pub unsafe extern "C" fn sd_revoke_permission(d: *mut sd_driver, service: *const
     let d = unsafe { &*d };
     let service = match utf8(service, "service") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
     let id = match utf8(bundle_id, "bundle_id") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
-    device_result(d.driver.revoke_permission(service, id), "revoke_permission")
+    device_call("revoke_permission", || d.driver.revoke_permission(service, id))
 }
 
 #[unsafe(no_mangle)]
@@ -547,7 +559,7 @@ pub unsafe extern "C" fn sd_reset_permission(d: *mut sd_driver, service: *const 
     let d = unsafe { &*d };
     let service = match utf8(service, "service") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
     let id = match utf8(bundle_id, "bundle_id") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
-    device_result(d.driver.reset_permission(service, id), "reset_permission")
+    device_call("reset_permission", || d.driver.reset_permission(service, id))
 }
 
 #[unsafe(no_mangle)]
@@ -555,7 +567,7 @@ pub unsafe extern "C" fn sd_set_content_size(d: *mut sd_driver, size: *const c_c
     clear_error();
     if d.is_null() { return false; }
     let d = unsafe { &*d };
-    match utf8(size, "size") { Ok(s) => device_result(d.driver.set_content_size(s), "set_content_size"), Err(e) => { set_error(e); false } }
+    match utf8(size, "size") { Ok(s) => device_call("set_content_size", || d.driver.set_content_size(s)), Err(e) => { set_error(e); false } }
 }
 
 #[unsafe(no_mangle)]
@@ -563,7 +575,7 @@ pub unsafe extern "C" fn sd_status_bar_override(d: *mut sd_driver) -> bool {
     clear_error();
     if d.is_null() { return false; }
     let d = unsafe { &*d };
-    device_result(d.driver.status_bar_override(), "status_bar_override")
+    device_call("status_bar_override", || d.driver.status_bar_override())
 }
 
 #[unsafe(no_mangle)]
@@ -571,7 +583,7 @@ pub unsafe extern "C" fn sd_status_bar_clear(d: *mut sd_driver) -> bool {
     clear_error();
     if d.is_null() { return false; }
     let d = unsafe { &*d };
-    device_result(d.driver.status_bar_clear(), "status_bar_clear")
+    device_call("status_bar_clear", || d.driver.status_bar_clear())
 }
 
 #[unsafe(no_mangle)]
@@ -581,7 +593,7 @@ pub unsafe extern "C" fn sd_push_notification(d: *mut sd_driver, bundle_id: *con
     let d = unsafe { &*d };
     let id = match utf8(bundle_id, "bundle_id") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
     let path = match utf8(payload_path, "payload_path") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
-    device_result(d.driver.push_notification(id, path), "push_notification")
+    device_call("push_notification", || d.driver.push_notification(id, path))
 }
 
 #[unsafe(no_mangle)]
@@ -589,7 +601,7 @@ pub unsafe extern "C" fn sd_reset_keychain(d: *mut sd_driver) -> bool {
     clear_error();
     if d.is_null() { return false; }
     let d = unsafe { &*d };
-    device_result(d.driver.reset_keychain(), "reset_keychain")
+    device_call("reset_keychain", || d.driver.reset_keychain())
 }
 
 /// Clear an app's saved data container. This explicitly deletes its data and terminates it.
@@ -599,7 +611,7 @@ pub unsafe extern "C" fn sd_clear_app_data(d: *mut sd_driver, bundle_id: *const 
     if d.is_null() { return false; }
     let d = unsafe { &*d };
     let id = match utf8(bundle_id, "bundle_id") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
-    device_result(d.driver.clear_app_data(id), "clear_app_data")
+    device_call("clear_app_data", || d.driver.clear_app_data(id))
 }
 
 /// Return installed simulator apps as JSON; free the result with `sd_string_free`.

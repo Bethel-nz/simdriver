@@ -2,6 +2,7 @@ use crate::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -83,27 +84,47 @@ pub(crate) fn parse_devices(json: &str) -> Result<Vec<Device>, Error> {
     Ok(out)
 }
 
-/// Run `xcrun simctl <args>`; returns (success, stderr). Kills the child after `timeout`.
+/// Run `xcrun simctl <args>`; returns (success, stdout, stderr). Kills the child after
+/// `timeout`.
 fn run_simctl(args: &[&str], timeout: Duration) -> Result<(bool, String, String), Error> {
-    let mut child = Command::new("xcrun")
-        .arg("simctl")
+    run("xcrun", &[&["simctl"], args].concat(), None, timeout)
+}
+
+/// [`run_simctl`] with `input` written to the child's stdin.
+fn run_simctl_input(args: &[&str], input: &[u8], timeout: Duration) -> Result<(bool, String, String), Error> {
+    run("xcrun", &[&["simctl"], args].concat(), Some(input), timeout)
+}
+
+/// Run `program`, feeding it `input` (if any) and draining both pipes on threads so
+/// neither side can block the other; kills the child after `timeout`.
+fn run(program: &str, args: &[&str], input: Option<&[u8]>, timeout: Duration) -> Result<(bool, String, String), Error> {
+    let mut child = Command::new(program)
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let mut out_pipe = child.stdout.take().unwrap();
-    let mut err_pipe = child.stderr.take().unwrap();
-    let out_t = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = out_pipe.read_to_string(&mut s);
-        s
-    });
-    let err_t = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = err_pipe.read_to_string(&mut s);
-        s
-    });
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = pipe.read_to_string(&mut s);
+            s
+        })
+    };
+    let out_t = drain(Box::new(child.stdout.take().unwrap()));
+    let err_t = drain(Box::new(child.stderr.take().unwrap()));
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        // A child that exits before reading everything must fail the write with EPIPE,
+        // not kill a host that does not ignore SIGPIPE (C/Swift hosts don't).
+        unsafe {
+            libc::fcntl(stdin.as_raw_fd(), libc::F_SETNOSIGPIPE, 1);
+        }
+        let input = input.to_vec();
+        // On a thread: a child that never reads must not stall us past the timeout.
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
+    }
     let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(st) = child.try_wait()? {
@@ -113,7 +134,7 @@ fn run_simctl(args: &[&str], timeout: Duration) -> Result<(bool, String, String)
             let _ = child.kill();
             let _ = child.wait();
             return Err(Error::Simctl(format!(
-                "simctl {} timed out after {}s",
+                "{program} {} timed out after {}s",
                 args.join(" "),
                 timeout.as_secs()
             )));
@@ -123,32 +144,6 @@ fn run_simctl(args: &[&str], timeout: Duration) -> Result<(bool, String, String)
     let out = out_t.join().unwrap_or_default();
     let err = err_t.join().unwrap_or_default();
     Ok((status.success(), out, err))
-}
-
-fn run_simctl_input(args: &[&str], input: &[u8], timeout: Duration) -> Result<(bool, String, String), Error> {
-    let mut child = Command::new("xcrun")
-        .arg("simctl")
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let mut out_pipe = child.stdout.take().unwrap();
-    let mut err_pipe = child.stderr.take().unwrap();
-    let out_t = std::thread::spawn(move || { let mut s = String::new(); let _ = out_pipe.read_to_string(&mut s); s });
-    let err_t = std::thread::spawn(move || { let mut s = String::new(); let _ = err_pipe.read_to_string(&mut s); s });
-    child.stdin.take().unwrap().write_all(input)?;
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        if let Some(st) = child.try_wait()? { break st; }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Error::Simctl(format!("simctl {} timed out", args.join(" "))));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    Ok((status.success(), out_t.join().unwrap_or_default(), err_t.join().unwrap_or_default()))
 }
 
 pub fn list_devices() -> Result<Vec<Device>, Error> {
@@ -182,18 +177,13 @@ fn parse_apps(plist: &str) -> Result<Vec<App>, Error> {
 }
 
 fn plist_json(plist: &str) -> Result<String, Error> {
-    let mut child = Command::new("plutil")
-        .args(["-convert", "json", "-o", "-", "-"])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-    let mut stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
-    let out_thread = std::thread::spawn(move || { let mut s = String::new(); let _ = stdout.read_to_string(&mut s); s });
-    let err_thread = std::thread::spawn(move || { let mut s = String::new(); let _ = stderr.read_to_string(&mut s); s });
-    child.stdin.take().unwrap().write_all(plist.as_bytes())?;
-    let status = child.wait()?;
-    let json = out_thread.join().unwrap_or_default();
-    let err = err_thread.join().unwrap_or_default();
-    if status.success() { Ok(json) } else { Err(Error::Simctl(format!("plutil could not parse simctl app list: {}", err.trim()))) }
+    let (ok, json, err) =
+        run("plutil", &["-convert", "json", "-o", "-", "-"], Some(plist.as_bytes()), Duration::from_secs(30))?;
+    if ok {
+        Ok(json)
+    } else {
+        Err(Error::Simctl(format!("plutil could not parse simctl app list: {}", err.trim())))
+    }
 }
 
 /// Explicitly terminate an app and clear the contents of its simulator data container.

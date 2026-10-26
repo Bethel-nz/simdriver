@@ -931,54 +931,71 @@ impl Driver {
         crate::devices::clipboard_write(&self.inner.udid, text)
     }
 
+    /// Open a URL on the device (`simctl openurl`): Safari for web links, or the app
+    /// that handles a custom scheme. iOS may ask "Open in …?" first.
     pub fn open_url(&self, url: &str) -> Result<(), Error> {
         crate::devices::open_url(&self.inner.udid, url)
     }
 
+    /// Launch an installed app (`simctl launch`); brings it to the front.
     pub fn launch(&self, bundle_id: &str) -> Result<(), Error> {
         crate::devices::launch(&self.inner.udid, bundle_id)
     }
 
+    /// Terminate a running app (`simctl terminate`).
     pub fn terminate(&self, bundle_id: &str) -> Result<(), Error> {
         crate::devices::terminate(&self.inner.udid, bundle_id)
     }
 
+    /// Simulate the device being at `lat`, `lon` (`simctl location set`).
     pub fn set_location(&self, lat: f64, lon: f64) -> Result<(), Error> {
         crate::devices::set_location(&self.inner.udid, lat, lon)
     }
 
+    /// Switch the system between light and dark mode.
     pub fn set_appearance(&self, appearance: crate::devices::Appearance) -> Result<(), Error> {
         crate::devices::set_appearance(&self.inner.udid, appearance)
     }
 
+    /// Grant `bundle_id` a privacy `service` (`location`, `photos`, `contacts`, …) via
+    /// `simctl privacy`, so its prompt never shows. A running app may cache the old
+    /// answer until it relaunches.
     pub fn grant_permission(&self, service: &str, bundle_id: &str) -> Result<(), Error> {
         crate::devices::grant_permission(&self.inner.udid, service, bundle_id)
     }
 
+    /// Deny `bundle_id` a privacy `service`.
     pub fn revoke_permission(&self, service: &str, bundle_id: &str) -> Result<(), Error> {
         crate::devices::revoke_permission(&self.inner.udid, service, bundle_id)
     }
 
+    /// Forget `bundle_id`'s answer for a privacy `service`, so the app asks again.
     pub fn reset_permission(&self, service: &str, bundle_id: &str) -> Result<(), Error> {
         crate::devices::reset_permission(&self.inner.udid, service, bundle_id)
     }
 
+    /// Dynamic Type size: `extra-small` … `accessibility-extra-extra-extra-large`, or
+    /// `increment` / `decrement`.
     pub fn set_content_size(&self, size: &str) -> Result<(), Error> {
         crate::devices::set_content_size(&self.inner.udid, size)
     }
 
+    /// A clean status bar for screenshots: 9:41, full battery, charged.
     pub fn status_bar_override(&self) -> Result<(), Error> {
         crate::devices::status_bar_override(&self.inner.udid)
     }
 
+    /// Undo [`Driver::status_bar_override`].
     pub fn status_bar_clear(&self) -> Result<(), Error> {
         crate::devices::status_bar_clear(&self.inner.udid)
     }
 
+    /// Deliver the APNs payload in the JSON file at `payload_path` to `bundle_id`.
     pub fn push_notification(&self, bundle_id: &str, payload_path: &str) -> Result<(), Error> {
         crate::devices::push_notification(&self.inner.udid, bundle_id, payload_path)
     }
 
+    /// Erase the simulator's keychain.
     pub fn reset_keychain(&self) -> Result<(), Error> {
         crate::devices::reset_keychain(&self.inner.udid)
     }
@@ -998,10 +1015,12 @@ impl Driver {
         self.inner.input(Raw::Cmd(HidCmd::Button { name: b.wire(), presses, hold_secs }));
     }
 
+    /// The current state (the last one delivered as an event).
     pub fn state(&self) -> State {
         *lock(&self.inner.shared.state)
     }
 
+    /// Frame-rate and input-latency counters since start.
     pub fn stats(&self) -> Stats {
         let st = lock(&self.inner.shared.stats);
         st.snapshot(self.inner.shared.epoch.elapsed())
