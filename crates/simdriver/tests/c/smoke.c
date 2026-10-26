@@ -41,9 +41,27 @@ int main(void) {
         fprintf(stderr, "sd_key(NULL) must return false\n");
         return 1;
     }
+    if (sd_key_combo(NULL, "cmd+a")) {
+        fprintf(stderr, "sd_key_combo(NULL) must return false\n");
+        return 1;
+    }
+    if (sd_open_url(NULL, "https://example.com") || sd_launch(NULL, "x") || sd_terminate(NULL, "x")
+        || sd_set_location(NULL, 0, 0) || sd_set_appearance(NULL, 0) || sd_grant_permission(NULL, "camera", "x")
+        || sd_clipboard_write(NULL, "x") || sd_clipboard_read(NULL) != NULL) {
+        fprintf(stderr, "device controls must be NULL-safe\n");
+        return 1;
+    }
+    if (sd_revoke_permission(NULL, "camera", "x") || sd_reset_permission(NULL, "camera", "x")
+        || sd_set_content_size(NULL, "large") || sd_status_bar_override(NULL) || sd_status_bar_clear(NULL)
+        || sd_push_notification(NULL, "x", "x") || sd_reset_keychain(NULL)
+        || sd_clear_app_data(NULL, "x") || sd_apps(NULL) != NULL) {
+        fprintf(stderr, "simulator settings must be NULL-safe\n");
+        return 1;
+    }
     sd_text(NULL, "hi");
     sd_tap(NULL, 0.5, 0.5);
     sd_long_press(NULL, 0.5, 0.5, 0.8f);
+    sd_drag(NULL, 0.2, 0.5, 0.8, 0.5, 0.3f, 0.6f);
     if (sd_accessibility_json(NULL) != NULL) {
         fprintf(stderr, "sd_accessibility_json(NULL) must return NULL\n");
         return 1;

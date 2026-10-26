@@ -1,6 +1,8 @@
 use crate::Error;
-use serde::Deserialize;
-use std::io::Read;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::io::{Read, Write};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -14,6 +16,13 @@ pub struct Device {
     pub state: String,
     pub device_type: String,
     pub runtime: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct App {
+    pub bundle_id: String,
+    pub name: String,
+    pub app_type: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,12 +125,110 @@ fn run_simctl(args: &[&str], timeout: Duration) -> Result<(bool, String, String)
     Ok((status.success(), out, err))
 }
 
+fn run_simctl_input(args: &[&str], input: &[u8], timeout: Duration) -> Result<(bool, String, String), Error> {
+    let mut child = Command::new("xcrun")
+        .arg("simctl")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut out_pipe = child.stdout.take().unwrap();
+    let mut err_pipe = child.stderr.take().unwrap();
+    let out_t = std::thread::spawn(move || { let mut s = String::new(); let _ = out_pipe.read_to_string(&mut s); s });
+    let err_t = std::thread::spawn(move || { let mut s = String::new(); let _ = err_pipe.read_to_string(&mut s); s });
+    child.stdin.take().unwrap().write_all(input)?;
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(st) = child.try_wait()? { break st; }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::Simctl(format!("simctl {} timed out", args.join(" "))));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    Ok((status.success(), out_t.join().unwrap_or_default(), err_t.join().unwrap_or_default()))
+}
+
 pub fn list_devices() -> Result<Vec<Device>, Error> {
     let (ok, out, err) = run_simctl(&["list", "devices", "-j"], Duration::from_secs(30))?;
     if !ok {
         return Err(Error::Simctl(err.trim().to_string()));
     }
     parse_devices(&out)
+}
+
+/// List installed simulator apps (including system apps) by bundle identifier.
+pub fn list_apps(udid: &str) -> Result<Vec<App>, Error> {
+    let (ok, plist, err) = run_simctl(&["listapps", udid], Duration::from_secs(30))?;
+    if !ok { return Err(Error::Simctl(err.trim().to_string())); }
+    parse_apps(&plist)
+}
+
+fn parse_apps(plist: &str) -> Result<Vec<App>, Error> {
+    let json = plist_json(plist)?;
+    let entries: std::collections::BTreeMap<String, Value> = serde_json::from_str(&json)
+        .map_err(|e| Error::Simctl(format!("bad simctl app list: {e}")))?;
+    let mut apps = entries.into_iter().map(|(bundle_id, value)| {
+        let name = value.get("CFBundleDisplayName").and_then(Value::as_str)
+            .or_else(|| value.get("CFBundleName").and_then(Value::as_str))
+            .unwrap_or(&bundle_id).to_string();
+        let app_type = value.get("ApplicationType").and_then(Value::as_str).unwrap_or("Unknown").to_string();
+        App { bundle_id, name, app_type }
+    }).collect::<Vec<_>>();
+    apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.bundle_id.cmp(&b.bundle_id)));
+    Ok(apps)
+}
+
+fn plist_json(plist: &str) -> Result<String, Error> {
+    let mut child = Command::new("plutil")
+        .args(["-convert", "json", "-o", "-", "-"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let out_thread = std::thread::spawn(move || { let mut s = String::new(); let _ = stdout.read_to_string(&mut s); s });
+    let err_thread = std::thread::spawn(move || { let mut s = String::new(); let _ = stderr.read_to_string(&mut s); s });
+    child.stdin.take().unwrap().write_all(plist.as_bytes())?;
+    let status = child.wait()?;
+    let json = out_thread.join().unwrap_or_default();
+    let err = err_thread.join().unwrap_or_default();
+    if status.success() { Ok(json) } else { Err(Error::Simctl(format!("plutil could not parse simctl app list: {}", err.trim()))) }
+}
+
+/// Explicitly terminate an app and clear the contents of its simulator data container.
+/// This is destructive to the app's saved state and is never called implicitly.
+pub fn clear_app_data(udid: &str, bundle_id: &str) -> Result<(), Error> {
+    if udid.len() != 36 || !udid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+        return Err(Error::Simctl("invalid simulator UDID".into()));
+    }
+    if bundle_id.is_empty() || bundle_id.contains('/') || bundle_id.contains('\\') || bundle_id.contains('\0') {
+        return Err(Error::Simctl("invalid app bundle identifier".into()));
+    }
+    let (ok, path, err) = run_simctl(&["get_app_container", udid, bundle_id, "data"], Duration::from_secs(30))?;
+    if !ok { return Err(Error::Simctl(format!("get app data container failed: {}", err.trim()))); }
+    let container = PathBuf::from(path.trim()).canonicalize()?;
+    if !is_sim_app_data_container(&container, udid) {
+        return Err(Error::Simctl(format!("refusing to clear unexpected data container: {}", container.display())));
+    }
+    let (terminated, _, terminate_err) = run_simctl(&["terminate", udid, bundle_id], Duration::from_secs(30))?;
+    if !terminated && !terminate_err.to_ascii_lowercase().contains("not running") {
+        return Err(Error::Simctl(format!("could not terminate app before clearing data: {}", terminate_err.trim())));
+    }
+    for entry in std::fs::read_dir(&container)? {
+        let entry = entry?;
+        let path = entry.path();
+        let kind = entry.file_type()?;
+        if kind.is_dir() { std::fs::remove_dir_all(path)?; } else { std::fs::remove_file(path)?; }
+    }
+    Ok(())
+}
+
+fn is_sim_app_data_container(path: &Path, udid: &str) -> bool {
+    let c = path.components().filter_map(|c| match c { Component::Normal(s) => s.to_str(), _ => None }).collect::<Vec<_>>();
+    c.len() >= 7
+        && c[c.len() - 7..c.len() - 1] == ["Devices", udid, "data", "Containers", "Data", "Application"]
+        && c.last().is_some_and(|s| s.len() == 36 && s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
 }
 
 /// Boot headlessly and wait until ready. Already-booted is success.
@@ -143,6 +250,89 @@ pub fn shutdown(udid: &str) -> Result<(), Error> {
         return Ok(());
     }
     Err(Error::Simctl(err.trim().to_string()))
+}
+
+/// Copy UTF-8 text to a simulator's pasteboard. An empty string clears it.
+pub fn clipboard_write(udid: &str, text: &str) -> Result<(), Error> {
+    let (ok, _, err) = run_simctl_input(&["pbcopy", udid], text.as_bytes(), Duration::from_secs(10))?;
+    if ok { return Ok(()); }
+    // Some CoreSimulator runtimes apply the pasteboard write but then time out while
+    // waiting for the host-side clipboard notification. Confirm the observable state
+    // before treating that runtime response as a failure.
+    match clipboard_read(udid) {
+        Ok(current) if current == text => Ok(()),
+        _ => Err(Error::Simctl(format!("pbcopy failed: {}", err.trim()))),
+    }
+}
+
+/// Read UTF-8 text from a simulator's pasteboard.
+pub fn clipboard_read(udid: &str) -> Result<String, Error> {
+    let (ok, out, err) = run_simctl(&["pbpaste", udid], Duration::from_secs(10))?;
+    if ok { Ok(out) } else { Err(Error::Simctl(format!("pbpaste failed: {}", err.trim()))) }
+}
+
+fn simctl_ok(args: &[&str]) -> Result<(), Error> {
+    let (ok, _, err) = run_simctl(args, Duration::from_secs(30))?;
+    if ok { Ok(()) } else { Err(Error::Simctl(err.trim().to_string())) }
+}
+
+pub fn open_url(udid: &str, url: &str) -> Result<(), Error> {
+    simctl_ok(&["openurl", udid, url])
+}
+
+pub fn launch(udid: &str, bundle_id: &str) -> Result<(), Error> {
+    simctl_ok(&["launch", udid, bundle_id])
+}
+
+pub fn terminate(udid: &str, bundle_id: &str) -> Result<(), Error> {
+    simctl_ok(&["terminate", udid, bundle_id])
+}
+
+pub fn set_location(udid: &str, lat: f64, lon: f64) -> Result<(), Error> {
+    if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) || !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
+        return Err(Error::Simctl("latitude/longitude out of range".into()));
+    }
+    let coordinates = format!("{lat},{lon}");
+    simctl_ok(&["location", udid, "set", &coordinates])
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Appearance { Light, Dark }
+
+pub fn set_appearance(udid: &str, appearance: Appearance) -> Result<(), Error> {
+    simctl_ok(&["ui", udid, "appearance", match appearance { Appearance::Light => "light", Appearance::Dark => "dark" }])
+}
+
+pub fn grant_permission(udid: &str, service: &str, bundle_id: &str) -> Result<(), Error> {
+    simctl_ok(&["privacy", udid, "grant", service, bundle_id])
+}
+
+pub fn revoke_permission(udid: &str, service: &str, bundle_id: &str) -> Result<(), Error> {
+    simctl_ok(&["privacy", udid, "revoke", service, bundle_id])
+}
+
+pub fn reset_permission(udid: &str, service: &str, bundle_id: &str) -> Result<(), Error> {
+    simctl_ok(&["privacy", udid, "reset", service, bundle_id])
+}
+
+pub fn set_content_size(udid: &str, size: &str) -> Result<(), Error> {
+    simctl_ok(&["ui", udid, "content_size", size])
+}
+
+pub fn status_bar_override(udid: &str) -> Result<(), Error> {
+    simctl_ok(&["status_bar", udid, "override", "--time", "9:41", "--batteryLevel", "100", "--batteryState", "charged"])
+}
+
+pub fn status_bar_clear(udid: &str) -> Result<(), Error> {
+    simctl_ok(&["status_bar", udid, "clear"])
+}
+
+pub fn push_notification(udid: &str, bundle_id: &str, payload_path: &str) -> Result<(), Error> {
+    simctl_ok(&["push", udid, bundle_id, payload_path])
+}
+
+pub fn reset_keychain(udid: &str) -> Result<(), Error> {
+    simctl_ok(&["keychain", udid, "reset"])
 }
 
 #[cfg(test)]
@@ -176,6 +366,30 @@ mod tests {
     #[test]
     fn parse_rejects_garbage() {
         assert!(matches!(parse_devices("nope"), Err(Error::Simctl(_))));
+    }
+
+    #[test]
+    fn parses_simctl_app_plist_into_named_apps() {
+        let plist = r#"{
+          "com.example.zebra" = { ApplicationType = User; CFBundleName = Zebra; };
+          "com.example.alpha" = { ApplicationType = User; CFBundleDisplayName = Alpha; CFBundleName = Fallback; };
+        }"#;
+        let apps = parse_apps(plist).unwrap();
+        assert_eq!(apps[0].name, "Alpha");
+        assert_eq!(apps[1].name, "Zebra");
+    }
+
+    #[test]
+    fn app_data_clear_accepts_only_simulator_application_containers() {
+        let udid = "8BC981D2-7C86-4EFC-944C-AC33FD0262FC";
+        let good = Path::new("/Users/test/Library/Developer/CoreSimulator/Devices/8BC981D2-7C86-4EFC-944C-AC33FD0262FC/data/Containers/Data/Application/B5D07B81-A27A-4A8C-84D6-031FFB375944");
+        let wrong_sim = good.to_string_lossy().replace(udid, "00000000-0000-0000-0000-000000000000");
+        let too_high = Path::new("/Users/test/Library/Developer/CoreSimulator/Devices/8BC981D2-7C86-4EFC-944C-AC33FD0262FC/data/Containers/Data/Application");
+        let nested = Path::new("/Users/test/Library/Developer/CoreSimulator/Devices/8BC981D2-7C86-4EFC-944C-AC33FD0262FC/data/Containers/Data/Application/B5D07B81-A27A-4A8C-84D6-031FFB375944/extra/A5D07B81-A27A-4A8C-84D6-031FFB375944");
+        assert!(is_sim_app_data_container(good, udid));
+        assert!(!is_sim_app_data_container(Path::new(&wrong_sim), udid));
+        assert!(!is_sim_app_data_container(too_high, udid));
+        assert!(!is_sim_app_data_container(nested, udid));
     }
 
     #[test]

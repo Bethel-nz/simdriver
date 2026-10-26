@@ -59,6 +59,18 @@ void sd_tap(struct sd_driver *d, double x, double y);
 void sd_long_press(struct sd_driver *d, double x, double y, double hold_secs);
 
 /**
+ * Drag from (x1, y1) to (x2, y2), each 0..1 in the box: down, hold `hold_secs`, move
+ * over `move_secs`, lift.
+ */
+void sd_drag(struct sd_driver *d,
+             double x1,
+             double y1,
+             double x2,
+             double y2,
+             double hold_secs,
+             double move_secs);
+
+/**
  * The frontmost app's accessibility tree as JSON (one node: `role`, `label`?, `value`?,
  * `id`?, `enabled`, `frame` [x,y,w,h] in screen points, `children`?). Blocks; the first
  * call takes 1–2 s. Returns NULL on failure (see `sd_last_error`); free the result
@@ -95,6 +107,54 @@ bool sd_grid_cell(double screen_w,
 bool sd_screen_points(struct sd_driver *d, double *w, double *h);
 
 bool sd_key(struct sd_driver *d, const char *name);
+
+/**
+ * Press a key combination such as `cmd+a`. Modifiers are cmd, shift, alt, or ctrl.
+ */
+bool sd_key_combo(struct sd_driver *d, const char *combo);
+
+bool sd_open_url(struct sd_driver *d, const char *url);
+
+bool sd_launch(struct sd_driver *d, const char *bundle_id);
+
+bool sd_terminate(struct sd_driver *d, const char *bundle_id);
+
+bool sd_set_location(struct sd_driver *d, double lat, double lon);
+
+/**
+ * Appearance code: 0 = light, 1 = dark.
+ */
+bool sd_set_appearance(struct sd_driver *d, int32_t appearance);
+
+bool sd_grant_permission(struct sd_driver *d, const char *service, const char *bundle_id);
+
+bool sd_clipboard_write(struct sd_driver *d, const char *text);
+
+char *sd_clipboard_read(struct sd_driver *d);
+
+bool sd_revoke_permission(struct sd_driver *d, const char *service, const char *bundle_id);
+
+bool sd_reset_permission(struct sd_driver *d, const char *service, const char *bundle_id);
+
+bool sd_set_content_size(struct sd_driver *d, const char *size);
+
+bool sd_status_bar_override(struct sd_driver *d);
+
+bool sd_status_bar_clear(struct sd_driver *d);
+
+bool sd_push_notification(struct sd_driver *d, const char *bundle_id, const char *payload_path);
+
+bool sd_reset_keychain(struct sd_driver *d);
+
+/**
+ * Clear an app's saved data container. This explicitly deletes its data and terminates it.
+ */
+bool sd_clear_app_data(struct sd_driver *d, const char *bundle_id);
+
+/**
+ * Return installed simulator apps as JSON; free the result with `sd_string_free`.
+ */
+char *sd_apps(struct sd_driver *d);
 
 void sd_text(struct sd_driver *d, const char *s);
 

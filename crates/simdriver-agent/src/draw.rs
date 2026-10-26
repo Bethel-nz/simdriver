@@ -136,6 +136,33 @@ pub fn grid(frame: &Frame, grid: &Grid) -> Vec<u8> {
     c.png()
 }
 
+/// Crop an element frame from a BGRA simulator frame and return a PNG.
+pub fn crop(frame: &Frame, screen: (f64, f64), rect: [f64; 4]) -> Option<Vec<u8>> {
+    let k = frame.width as f64 / screen.0;
+    let x0 = (rect[0] * k).floor().max(0.0) as usize;
+    let y0 = (rect[1] * k).floor().max(0.0) as usize;
+    let x1 = ((rect[0] + rect[2]) * k).ceil().min(frame.width as f64) as usize;
+    let y1 = ((rect[1] + rect[3]) * k).ceil().min(frame.height as f64) as usize;
+    if x1 <= x0 || y1 <= y0 { return None; }
+    let (w, h) = (x1 - x0, y1 - y0);
+    let mut rgb = Vec::with_capacity(w * h * 3);
+    for y in y0..y1 {
+        let row = &frame.data[(y * frame.width as usize + x0) * 4..(y * frame.width as usize + x1) * 4];
+        for p in row.as_chunks::<4>().0 {
+            rgb.extend_from_slice(&[p[2], p[1], p[0]]);
+        }
+    }
+    let mut out = Vec::new();
+    let mut enc = png::Encoder::new(&mut out, w as u32, h as u32);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.set_compression(png::Compression::Fast);
+    let mut writer = enc.write_header().ok()?;
+    writer.write_image_data(&rgb).ok()?;
+    writer.finish().ok()?;
+    Some(out)
+}
+
 /// 5×7 glyphs (row bits, MSB left) for refs and cell names: 0-9, A-Z, e.
 fn glyph(c: char) -> [u8; 7] {
     match c {

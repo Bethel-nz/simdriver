@@ -7,7 +7,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from './runner.ts';
-import { Driver, Grid, listDevices } from '../index.js';
+import { Driver, Grid, listApps, listDevices } from '../index.js';
 
 const IT = process.env.SIMDRIVER_IT === '1';
 const here = dirname(fileURLToPath(import.meta.url));
@@ -42,6 +42,14 @@ describe('simdriver', () => {
     for (const key of ['udid', 'name', 'state', 'deviceType', 'runtime']) {
       expect(key in devices[0]).toBeTruthy();
     }
+  });
+
+  test('listApps returns installed apps on the selected simulator', () => {
+    const udid = process.env.SIMDRIVER_TEST_UDID;
+    if (!IT || !udid) return;
+    const apps = listApps(udid);
+    expect(apps.some((app) => app.bundleId === 'com.apple.mobilesafari')).toBeTruthy();
+    expect(apps.every((app) => app.name.length > 0 && app.appType.length > 0)).toBeTruthy();
   });
 
   test('Grid names cells and finds them again', () => {
@@ -82,6 +90,7 @@ describe('simdriver', () => {
     clearInterval(timer);
     expect(ticks).toBeGreaterThan(0);
     expect(driver.udid).toBe(udid);
+    expect(driver.apps().some((app) => app.bundleId === 'com.apple.mobilesafari')).toBeTruthy();
 
     const deadline = Date.now() + 10_000;
     while (events.filter((e) => e.type === 'frame').length < 100 && Date.now() < deadline) {

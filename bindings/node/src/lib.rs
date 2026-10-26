@@ -34,6 +34,13 @@ pub struct Device {
   pub runtime: String,
 }
 
+#[napi(object)]
+pub struct App {
+  pub bundle_id: String,
+  pub name: String,
+  pub app_type: String,
+}
+
 /// `Driver.start` off the JS thread: `sd::Driver::start` blocks until live.
 pub struct StartTask {
   opts: Option<sd::Options>,
@@ -319,6 +326,15 @@ pub fn list_devices() -> Result<Vec<Device>> {
 }
 
 #[napi]
+pub fn list_apps(udid: String) -> Result<Vec<App>> {
+  sd::list_apps(&udid).map_err(to_napi).map(|apps| apps.into_iter().map(|app| App {
+    bundle_id: app.bundle_id,
+    name: app.name,
+    app_type: app.app_type,
+  }).collect())
+}
+
+#[napi]
 pub fn boot(udid: String) -> Result<()> {
   sd::boot(&udid).map_err(to_napi)
 }
@@ -564,9 +580,31 @@ impl Driver {
   }
 
   /// Press at (x, y), hold for `ms`, then lift — iOS's long press.
+  #[napi]
   pub fn long_press(&self, x: f64, y: f64, ms: Option<f64>) {
     let hold = std::time::Duration::from_secs_f64((ms.unwrap_or(800.0) / 1000.0).max(0.0));
     self.core.long_press(x, y, hold);
+  }
+
+  /// Drag between two points, each 0..1 in the box: down, hold `hold_ms` (default 300),
+  /// move over `move_ms` (default 600), lift.
+  #[napi]
+  pub fn drag(
+    &self,
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    hold_ms: Option<f64>,
+    move_ms: Option<f64>,
+    destination_hold_ms: Option<f64>,
+  ) {
+    let s = |ms: f64| std::time::Duration::from_secs_f64((ms / 1000.0).max(0.0));
+    self.core.drag_with_holds((x1, y1), (x2, y2), sd::DragTiming {
+      source_hold: s(hold_ms.unwrap_or(800.0)),
+      movement: s(move_ms.unwrap_or(500.0)),
+      destination_hold: s(destination_hold_ms.unwrap_or(0.0)),
+    });
   }
 
   #[napi(ts_return_type = "Promise<string>")]
@@ -589,6 +627,106 @@ impl Driver {
   #[napi]
   pub fn key(&self, name: String) -> Result<bool> {
     Ok(self.core.key(&name))
+  }
+
+  #[napi]
+  pub fn key_combo(&self, keys: Vec<String>) -> bool {
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+    self.core.key_combo(&keys)
+  }
+
+  #[napi]
+  pub fn clipboard_read(&self) -> Result<String> {
+    self.core.clipboard_read().map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  #[napi]
+  pub fn clipboard_write(&self, text: String) -> Result<()> {
+    self.core.clipboard_write(&text).map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  #[napi]
+  pub fn open_url(&self, url: String) -> Result<()> {
+    self.core.open_url(&url).map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  #[napi]
+  pub fn launch(&self, bundle_id: String) -> Result<()> {
+    self.core.launch(&bundle_id).map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  #[napi]
+  pub fn terminate(&self, bundle_id: String) -> Result<()> {
+    self.core.terminate(&bundle_id).map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  #[napi]
+  pub fn set_location(&self, lat: f64, lon: f64) -> Result<()> {
+    self.core.set_location(lat, lon).map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  #[napi]
+  pub fn set_appearance(&self, appearance: String) -> Result<()> {
+    let appearance = match appearance.to_ascii_lowercase().as_str() {
+      "light" => sd::Appearance::Light,
+      "dark" => sd::Appearance::Dark,
+      _ => return Err(Error::from_reason("appearance must be light or dark")),
+    };
+    self.core.set_appearance(appearance).map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  #[napi]
+  pub fn grant_permission(&self, service: String, bundle_id: String) -> Result<()> {
+    self.core.grant_permission(&service, &bundle_id).map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  #[napi]
+  pub fn revoke_permission(&self, service: String, bundle_id: String) -> Result<()> {
+    self.core.revoke_permission(&service, &bundle_id).map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  #[napi]
+  pub fn reset_permission(&self, service: String, bundle_id: String) -> Result<()> {
+    self.core.reset_permission(&service, &bundle_id).map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  #[napi]
+  pub fn set_content_size(&self, size: String) -> Result<()> {
+    self.core.set_content_size(&size).map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  #[napi]
+  pub fn status_bar_override(&self) -> Result<()> {
+    self.core.status_bar_override().map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  #[napi]
+  pub fn status_bar_clear(&self) -> Result<()> {
+    self.core.status_bar_clear().map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  #[napi]
+  pub fn push_notification(&self, bundle_id: String, payload_path: String) -> Result<()> {
+    self.core.push_notification(&bundle_id, &payload_path).map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  #[napi]
+  pub fn reset_keychain(&self) -> Result<()> {
+    self.core.reset_keychain().map_err(|e| Error::from_reason(e.to_string()))
+  }
+
+  #[napi]
+  pub fn apps(&self) -> Result<Vec<App>> {
+    self.core.apps().map_err(to_napi).map(|apps| apps.into_iter().map(|app| App {
+      bundle_id: app.bundle_id,
+      name: app.name,
+      app_type: app.app_type,
+    }).collect())
+  }
+
+  #[napi]
+  pub fn clear_app_data(&self, bundle_id: String) -> Result<()> {
+    self.core.clear_app_data(&bundle_id).map_err(to_napi)
   }
 
   #[napi]

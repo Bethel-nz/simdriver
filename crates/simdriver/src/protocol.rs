@@ -101,6 +101,7 @@ pub enum HidCmd {
     Touch2 { phase: Phase, x1: f64, y1: f64, x2: f64, y2: f64 },
     Button { name: &'static str, presses: u32, hold_secs: f32 },
     Key { code: u32 },
+    KeyCombo { code: u32, mods: Vec<u32> },
     Text(String),
 }
 
@@ -135,6 +136,10 @@ impl HidCmd {
                 s
             }
             HidCmd::Key { code } => format!(r#"{{"t":"key","code":{code}}}"#),
+            HidCmd::KeyCombo { code, mods } => format!(
+                r#"{{"t":"key","code":{code},"mods":{}}}"#,
+                serde_json::to_string(mods).expect("modifier list serializes")
+            ),
             HidCmd::Text(t) => format!(
                 r#"{{"t":"text","s":{}}}"#,
                 serde_json::to_string(t).expect("string serializes")
@@ -146,7 +151,7 @@ impl HidCmd {
     pub fn is_gesture_start(&self) -> bool {
         match self {
             HidCmd::Touch { phase, .. } | HidCmd::Touch2 { phase, .. } => *phase == Phase::Down,
-            HidCmd::Button { .. } | HidCmd::Key { .. } | HidCmd::Text(_) => true,
+            HidCmd::Button { .. } | HidCmd::Key { .. } | HidCmd::KeyCombo { .. } | HidCmd::Text(_) => true,
         }
     }
 }
@@ -207,6 +212,10 @@ mod tests {
             r#"{"t":"touch2","p":"move","x1":1.0,"y1":2.0,"x2":3.5,"y2":4.0}"#
         );
         assert_eq!(HidCmd::Key { code: 40 }.to_line(), r#"{"t":"key","code":40}"#);
+        assert_eq!(
+            HidCmd::KeyCombo { code: 4, mods: vec![227] }.to_line(),
+            r#"{"t":"key","code":4,"mods":[227]}"#
+        );
         assert_eq!(HidCmd::Text("a\"b".into()).to_line(), r#"{"t":"text","s":"a\"b"}"#);
     }
 

@@ -42,7 +42,7 @@
  *   {"t":"touch","p":"down|move|up","x":..,"y":..,"e":0-4}
  *   {"t":"touch2","p":"down|move|up","x1":..,"y1":..,"x2":..,"y2":..}
  *   {"t":"button","b":"HOME|LOCK|SIDE_BUTTON|SIRI|VOLUME_UP|VOLUME_DOWN","n":presses?,"d":holdSeconds?}
- *   {"t":"key","code":usage}           press + release
+ *   {"t":"key","code":usage,"mods":[usage,...]?} press + release with modifiers held
  *   {"t":"text","s":"..."}             US layout, ASCII
  *   {"t":"_invalidate"}                TEST ONLY: cancel the connection and take the same
  *                                      path as XPC_ERROR_CONNECTION_INVALID (displaced)
@@ -397,6 +397,21 @@ static void pressKey(uint64_t usage, BOOL shift) {
   usleep(kKeyGapUs);
 }
 
+static void pressKeyWithModifiers(uint64_t usage, NSArray *modifiers) {
+  for (NSNumber *modifier in modifiers) {
+    send(message("IndigoKeyboardButtonEvent", keyboardPayload(modifier.unsignedLongLongValue, 1), false));
+    usleep(kKeyGapUs);
+  }
+  send(message("IndigoKeyboardButtonEvent", keyboardPayload(usage, 1), false));
+  usleep(kKeyGapUs);
+  send(message("IndigoKeyboardButtonEvent", keyboardPayload(usage, 2), false));
+  usleep(kKeyGapUs);
+  for (NSNumber *modifier in modifiers.reverseObjectEnumerator) {
+    send(message("IndigoKeyboardButtonEvent", keyboardPayload(modifier.unsignedLongLongValue, 2), false));
+    usleep(kKeyGapUs);
+  }
+}
+
 /// US-layout HID keyboard usage for an ASCII character (USB HID usage table 0x07).
 static BOOL keyFor(unichar c, uint64_t *usage, BOOL *shift) {
   *shift = NO;
@@ -461,7 +476,9 @@ static void handle(NSDictionary *cmd) {
   } else if ([t isEqualToString:@"button"]) {
     pressButton(cmd[@"b"], (NSInteger)num(cmd, @"n"), num(cmd, @"d"));
   } else if ([t isEqualToString:@"key"]) {
-    pressKey((uint64_t)num(cmd, @"code"), NO);
+    NSArray *mods = [cmd[@"mods"] isKindOfClass:[NSArray class]] ? cmd[@"mods"] : @[];
+    if (mods.count) pressKeyWithModifiers((uint64_t)num(cmd, @"code"), mods);
+    else pressKey((uint64_t)num(cmd, @"code"), NO);
   } else if ([t isEqualToString:@"text"]) {
     typeString(cmd[@"s"] ?: @"");
   } else {

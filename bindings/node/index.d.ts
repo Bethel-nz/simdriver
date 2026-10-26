@@ -7,13 +7,52 @@
  */
 export declare class Agent {
   constructor(driver: Driver)
-  /** `settleMs`, `image`, `grid`, `cols` (all optional). */
-  snapshot(settleMs?: number | undefined | null, image?: boolean | undefined | null, grid?: boolean | undefined | null, cols?: number | undefined | null): Promise<JsSnapshot>
-  tap(target: string, expect?: string | undefined | null): Promise<string>
-  /** `steps`: a JSON array of steps (index.js stringifies). */
-  steps(steps: string): Promise<string>
+  snapshot(opts?: { settleMs?: number; image?: boolean; grid?: boolean; cols?: number }): Promise<JsSnapshot>
+  tap(target: string, opts?: { expect?: string }): Promise<Tapped>
+  steps(steps: AgentStep[]): Promise<StepsReport>
 }
 export type JsAgent = Agent
+
+export type AgentStep =
+  | { action: 'tap'; target: string }
+  | { action: 'longPress'; target: string; ms?: number }
+  | { action: 'drag'; from: string; to: string; sourceHoldMs?: number; moveMs?: number; destinationHoldMs?: number }
+  | { action: 'pinch'; target?: string; scale: number }
+  | { action: 'rotate'; target?: string; degrees: number }
+  | { action: 'pan'; target?: string; dx: number; dy: number; ms?: number }
+  | { action: 'transform'; target?: string; dx?: number; dy?: number; scale: number; degrees?: number }
+  | { action: 'fling'; direction: 'up' | 'down' | 'left' | 'right' }
+  | { action: 'swipe'; from: string | [number, number]; to: string | [number, number]; count?: number; pauseMs?: number }
+  | { action: 'scroll'; direction: 'up' | 'down' | 'left' | 'right'; target?: string }
+  | { action: 'fill'; target: string; value: string; secret?: boolean }
+  | { action: 'type'; value: string }
+  | { action: 'key'; name: string }
+  | { action: 'press'; button: string }
+  | { action: 'waitFor'; text: string; timeoutMs?: number }
+  | { action: 'openUrl'; url: string }
+  | { action: 'launch'; bundleId: string }
+  | { action: 'terminate'; bundleId: string }
+  | { action: 'setLocation'; lat: number; lon: number }
+  | { action: 'appearance'; appearance: 'light' | 'dark' }
+  | { action: 'clipboardRead' }
+  | { action: 'clipboardWrite'; text: string }
+  | { action: 'keyboardDismiss' }
+  | { action: 'back'; mode: 'system' | 'inApp' }
+  | { action: 'appSwitcher' }
+  | { action: 'screenshotElement'; target: string }
+  | { action: 'alert'; op: 'get' | 'wait' | 'accept' | 'dismiss'; ms?: number }
+
+export interface Tapped { target: string; name: string; at: [number, number] }
+export interface StepsReport {
+  ok: boolean
+  completed: number
+  failed: { index: number; step: AgentStep; code: string; error: string } | null
+  verified: boolean[]
+  clipboard: string[]
+  screenshots: { target: string; png: Buffer }[]
+  alerts: { title: string | null; message: string | null; buttons: string[] }[]
+  snapshot: unknown
+}
 
 export declare class Driver {
   /**
@@ -38,7 +77,29 @@ export declare class Driver {
   accessibility(): Promise<string>
   touch2(phaseStr: string, x1: number, y1: number, x2: number, y2: number): void
   screenPoints(): JsSize | null
+  longPress(x: number, y: number, ms?: number | undefined | null): void
+  drag(x1: number, y1: number, x2: number, y2: number, opts?: { holdMs?: number; moveMs?: number; destinationHoldMs?: number }): void
   key(name: string): boolean
+  keyCombo(keys: string[]): boolean
+  clipboardRead(): string
+  clipboardWrite(text: string): void
+  openUrl(url: string): void
+  launch(bundleId: string): void
+  terminate(bundleId: string): void
+  setLocation(lat: number, lon: number): void
+  setAppearance(appearance: 'light' | 'dark'): void
+  grantPermission(service: string, bundleId: string): void
+  revokePermission(service: string, bundleId: string): void
+  resetPermission(service: string, bundleId: string): void
+  setContentSize(size: string): void
+  statusBarOverride(): void
+  statusBarClear(): void
+  pushNotification(bundleId: string, payloadPath: string): void
+  resetKeychain(): void
+  /** List installed apps on this simulator, including system apps. */
+  apps(): App[]
+  /** Explicitly terminate the app and erase its saved data. Destructive. */
+  clearAppData(bundleId: string): void
   text(s: string): void
   button(name: string, presses?: number | undefined | null, holdSecs?: number | undefined | null): void
   stats(): JsStats
@@ -73,6 +134,12 @@ export interface Device {
   state: string
   deviceType: string
   runtime: string
+}
+
+export interface App {
+  bundleId: string
+  name: string
+  appType: string
 }
 
 /** One drained event; a frame carries the BGRA bytes (a Buffer, built on this thread). */
@@ -128,6 +195,9 @@ export interface JsStats {
 }
 
 export declare function listDevices(): Array<Device>
+
+/** List installed apps on a simulator, including system apps. */
+export declare function listApps(udid: string): Array<App>
 
 export declare function shutdown(udid: string): void
 

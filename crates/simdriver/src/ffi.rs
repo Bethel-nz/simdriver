@@ -8,7 +8,7 @@
 //! and supervisor); `sd_frame.data` is borrowed and only valid inside the callback.
 //! `Event::Note` has no C channel and is dropped.
 #![allow(non_snake_case, non_camel_case_types)]
-use crate::devices::DeviceSelector;
+use crate::devices::{Appearance, DeviceSelector};
 use crate::driver::{Button as DriverButton, Driver, Event, Modifiers, Options, State};
 use crate::gesture::ScrollPhase;
 use crate::grid::Grid;
@@ -83,6 +83,13 @@ fn panic_text(e: Box<dyn std::any::Any + Send>) -> String {
 /// Run `f`, turning a panic into `Err(msg)`.
 fn guarded(f: impl FnOnce() + std::panic::UnwindSafe) -> Result<(), String> {
     catch_unwind(f).map_err(|e| panic_text(e))
+}
+
+fn device_result(result: Result<(), crate::error::Error>, operation: &str) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(e) => { set_error(format!("{operation}: {e}")); false }
+    }
 }
 
 fn state_code(s: State) -> i32 {
@@ -283,6 +290,33 @@ pub unsafe extern "C" fn sd_long_press(d: *mut sd_driver, x: f64, y: f64, hold_s
     }));
 }
 
+/// Drag from (x1, y1) to (x2, y2), each 0..1 in the box: down, hold `hold_secs`, move
+/// over `move_secs`, lift.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_drag(
+    d: *mut sd_driver,
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    hold_secs: f64,
+    move_secs: f64,
+) {
+    clear_error();
+    if d.is_null() { return; }
+    let d = unsafe { &*d };
+    let _ = guarded(AssertUnwindSafe(|| {
+        d.driver.drag(
+            x1,
+            y1,
+            x2,
+            y2,
+            Duration::from_secs_f64(hold_secs.max(0.0)),
+            Duration::from_secs_f64(move_secs.max(0.0)),
+        );
+    }));
+}
+
 /// The frontmost app's accessibility tree as JSON (one node: `role`, `label`?, `value`?,
 /// `id`?, `enabled`, `frame` [x,y,w,h] in screen points, `children`?). Blocks; the first
 /// call takes 1–2 s. Returns NULL on failure (see `sd_last_error`); free the result
@@ -393,6 +427,188 @@ pub unsafe extern "C" fn sd_key(d: *mut sd_driver, name: *const c_char) -> bool 
             set_error(format!("panic in sd_key: {}", panic_text(p)));
             false
         }
+    }
+}
+
+/// Press a key combination such as `cmd+a`. Modifiers are cmd, shift, alt, or ctrl.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_key_combo(d: *mut sd_driver, combo: *const c_char) -> bool {
+    clear_error();
+    if d.is_null() || combo.is_null() { return false; }
+    let d = unsafe { &*d };
+    let Ok(combo) = (unsafe { CStr::from_ptr(combo) }).to_str() else {
+        set_error("key combo is not valid UTF-8");
+        return false;
+    };
+    match catch_unwind(AssertUnwindSafe(|| d.driver.key(combo))) {
+        Ok(ok) => ok,
+        Err(p) => {
+            set_error(format!("panic in sd_key_combo: {}", panic_text(p)));
+            false
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_open_url(d: *mut sd_driver, url: *const c_char) -> bool {
+    clear_error();
+    if d.is_null() { return false; }
+    let d = unsafe { &*d };
+    match utf8(url, "url") { Ok(url) => device_result(d.driver.open_url(url), "open_url"), Err(e) => { set_error(e); false } }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_launch(d: *mut sd_driver, bundle_id: *const c_char) -> bool {
+    clear_error();
+    if d.is_null() { return false; }
+    let d = unsafe { &*d };
+    match utf8(bundle_id, "bundle_id") { Ok(id) => device_result(d.driver.launch(id), "launch"), Err(e) => { set_error(e); false } }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_terminate(d: *mut sd_driver, bundle_id: *const c_char) -> bool {
+    clear_error();
+    if d.is_null() { return false; }
+    let d = unsafe { &*d };
+    match utf8(bundle_id, "bundle_id") { Ok(id) => device_result(d.driver.terminate(id), "terminate"), Err(e) => { set_error(e); false } }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_set_location(d: *mut sd_driver, lat: f64, lon: f64) -> bool {
+    clear_error();
+    if d.is_null() { return false; }
+    let d = unsafe { &*d };
+    device_result(d.driver.set_location(lat, lon), "set_location")
+}
+
+/// Appearance code: 0 = light, 1 = dark.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_set_appearance(d: *mut sd_driver, appearance: i32) -> bool {
+    clear_error();
+    if d.is_null() { return false; }
+    let mode = match appearance { 0 => Appearance::Light, 1 => Appearance::Dark, _ => { set_error("appearance must be 0 (light) or 1 (dark)"); return false; } };
+    let d = unsafe { &*d };
+    device_result(d.driver.set_appearance(mode), "set_appearance")
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_grant_permission(d: *mut sd_driver, service: *const c_char, bundle_id: *const c_char) -> bool {
+    clear_error();
+    if d.is_null() { return false; }
+    let d = unsafe { &*d };
+    let service = match utf8(service, "service") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
+    let bundle_id = match utf8(bundle_id, "bundle_id") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
+    device_result(d.driver.grant_permission(service, bundle_id), "grant_permission")
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_clipboard_write(d: *mut sd_driver, text: *const c_char) -> bool {
+    clear_error();
+    if d.is_null() { return false; }
+    let d = unsafe { &*d };
+    match utf8(text, "text") { Ok(text) => device_result(d.driver.clipboard_write(text), "clipboard_write"), Err(e) => { set_error(e); false } }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_clipboard_read(d: *mut sd_driver) -> *mut c_char {
+    clear_error();
+    if d.is_null() { return std::ptr::null_mut(); }
+    let d = unsafe { &*d };
+    match catch_unwind(AssertUnwindSafe(|| d.driver.clipboard_read())) {
+        Ok(Ok(text)) => CString::new(text).map(CString::into_raw).unwrap_or_else(|_| { set_error("clipboard contained a NUL byte"); std::ptr::null_mut() }),
+        Ok(Err(e)) => { set_error(e.to_string()); std::ptr::null_mut() }
+        Err(p) => { set_error(format!("panic in sd_clipboard_read: {}", panic_text(p))); std::ptr::null_mut() }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_revoke_permission(d: *mut sd_driver, service: *const c_char, bundle_id: *const c_char) -> bool {
+    clear_error();
+    if d.is_null() { return false; }
+    let d = unsafe { &*d };
+    let service = match utf8(service, "service") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
+    let id = match utf8(bundle_id, "bundle_id") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
+    device_result(d.driver.revoke_permission(service, id), "revoke_permission")
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_reset_permission(d: *mut sd_driver, service: *const c_char, bundle_id: *const c_char) -> bool {
+    clear_error();
+    if d.is_null() { return false; }
+    let d = unsafe { &*d };
+    let service = match utf8(service, "service") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
+    let id = match utf8(bundle_id, "bundle_id") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
+    device_result(d.driver.reset_permission(service, id), "reset_permission")
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_set_content_size(d: *mut sd_driver, size: *const c_char) -> bool {
+    clear_error();
+    if d.is_null() { return false; }
+    let d = unsafe { &*d };
+    match utf8(size, "size") { Ok(s) => device_result(d.driver.set_content_size(s), "set_content_size"), Err(e) => { set_error(e); false } }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_status_bar_override(d: *mut sd_driver) -> bool {
+    clear_error();
+    if d.is_null() { return false; }
+    let d = unsafe { &*d };
+    device_result(d.driver.status_bar_override(), "status_bar_override")
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_status_bar_clear(d: *mut sd_driver) -> bool {
+    clear_error();
+    if d.is_null() { return false; }
+    let d = unsafe { &*d };
+    device_result(d.driver.status_bar_clear(), "status_bar_clear")
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_push_notification(d: *mut sd_driver, bundle_id: *const c_char, payload_path: *const c_char) -> bool {
+    clear_error();
+    if d.is_null() { return false; }
+    let d = unsafe { &*d };
+    let id = match utf8(bundle_id, "bundle_id") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
+    let path = match utf8(payload_path, "payload_path") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
+    device_result(d.driver.push_notification(id, path), "push_notification")
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_reset_keychain(d: *mut sd_driver) -> bool {
+    clear_error();
+    if d.is_null() { return false; }
+    let d = unsafe { &*d };
+    device_result(d.driver.reset_keychain(), "reset_keychain")
+}
+
+/// Clear an app's saved data container. This explicitly deletes its data and terminates it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_clear_app_data(d: *mut sd_driver, bundle_id: *const c_char) -> bool {
+    clear_error();
+    if d.is_null() { return false; }
+    let d = unsafe { &*d };
+    let id = match utf8(bundle_id, "bundle_id") { Ok(s) => s, Err(e) => { set_error(e); return false; } };
+    device_result(d.driver.clear_app_data(id), "clear_app_data")
+}
+
+/// Return installed simulator apps as JSON; free the result with `sd_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_apps(d: *mut sd_driver) -> *mut c_char {
+    clear_error();
+    if d.is_null() { return std::ptr::null_mut(); }
+    let d = unsafe { &*d };
+    match catch_unwind(AssertUnwindSafe(|| d.driver.apps())) {
+        Ok(Ok(apps)) => match serde_json::to_string(&apps) {
+            Ok(json) => CString::new(json).map(CString::into_raw).unwrap_or_else(|_| {
+                set_error("app list contained a NUL byte");
+                std::ptr::null_mut()
+            }),
+            Err(e) => { set_error(format!("could not serialize app list: {e}")); std::ptr::null_mut() }
+        },
+        Ok(Err(e)) => { set_error(e.to_string()); std::ptr::null_mut() }
+        Err(p) => { set_error(format!("panic in sd_apps: {}", panic_text(p))); std::ptr::null_mut() }
     }
 }
 

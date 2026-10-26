@@ -48,6 +48,10 @@ const HID_KEYS: &[(&str, u32)] = &[
     ("tab", 43),
     ("space", 44),
     ("delete", 76),
+    ("home", 74),
+    ("end", 77),
+    ("pageup", 75),
+    ("pagedown", 78),
     ("right", 79),
     ("arrowright", 79),
     ("left", 80),
@@ -60,7 +64,16 @@ const HID_KEYS: &[(&str, u32)] = &[
 
 fn key_code(name: &str) -> Option<u32> {
     let name = name.to_ascii_lowercase();
-    HID_KEYS.iter().find(|(k, _)| *k == name).map(|(_, c)| *c)
+    HID_KEYS
+        .iter()
+        .find(|(k, _)| *k == name)
+        .map(|(_, c)| *c)
+        .or_else(|| match name.as_bytes() {
+            [b'a'..=b'z'] => Some(u32::from(name.as_bytes()[0] - b'a') + 4),
+            [b'1'..=b'9'] => Some(u32::from(name.as_bytes()[0] - b'1') + 30),
+            [b'0'] => Some(39),
+            _ => None,
+        })
 }
 
 /// How to start a [`Driver`].
@@ -89,6 +102,14 @@ pub struct Modifiers {
     pub shift: bool,
     pub ctrl: bool,
     pub meta: bool,
+}
+
+/// Pauses around the movement portion of a drag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DragTiming {
+    pub source_hold: Duration,
+    pub movement: Duration,
+    pub destination_hold: Duration,
 }
 
 /// A hardware button.
@@ -805,6 +826,33 @@ impl Driver {
         self.pointer(Phase::Up, x, y, Modifiers::default());
     }
 
+    /// Drag from (`x1`, `y1`) to (`x2`, `y2`), each 0..1 in the box: down, hold `hold`
+    /// first (so iOS treats it as a drag, not a scroll), move over `duration`, then
+    /// lift. Sleeps on the calling thread.
+    pub fn drag(&self, x1: f64, y1: f64, x2: f64, y2: f64, hold: Duration, duration: Duration) {
+        self.drag_with_holds((x1, y1), (x2, y2), DragTiming {
+            source_hold: hold,
+            movement: duration,
+            destination_hold: Duration::ZERO,
+        });
+    }
+
+    /// Drag with optional pauses at the source and destination.
+    pub fn drag_with_holds(&self, from: (f64, f64), to: (f64, f64), timing: DragTiming) {
+        let (x1, y1) = from;
+        let (x2, y2) = to;
+        self.pointer(Phase::Down, x1, y1, Modifiers::default());
+        thread::sleep(timing.source_hold);
+        let steps = (timing.movement.as_millis() / 16).max(2) as u32;
+        for i in 1..=steps {
+            thread::sleep(timing.movement / steps);
+            let t = f64::from(i) / f64::from(steps);
+            self.pointer(Phase::Move, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, Modifiers::default());
+        }
+        thread::sleep(timing.destination_hold);
+        self.pointer(Phase::Up, x2, y2, Modifiers::default());
+    }
+
     /// The frontmost app's accessibility tree (system UI such as the home screen
     /// included), frames in screen points. Blocks: the first call starts the `sdax`
     /// helper and takes 1–2 s while the guest warms up; later calls take tens of ms.
@@ -823,16 +871,119 @@ impl Driver {
     /// Press and release a named key (enter/return, escape, backspace, tab, space, delete,
     /// arrows; DOM spellings like "ArrowLeft" too; case-insensitive). False if unknown.
     pub fn key(&self, name: &str) -> bool {
+        if name.contains('+') {
+            let parts: Vec<&str> = name.split('+').collect();
+            return self.key_combo(&parts);
+        }
         let Some(code) = key_code(name) else { return false };
         self.inner.input(Raw::Cmd(HidCmd::Key { code }));
         true
     }
 
-    /// Type ASCII text (US layout).
-    pub fn text(&self, s: &str) {
-        if !s.is_empty() {
-            self.inner.input(Raw::Cmd(HidCmd::Text(s.to_string())));
+    /// Press the final key while holding cmd, shift, alt, or ctrl modifiers.
+    /// Example: `key_combo(&["cmd", "a"])` sends Command+A.
+    pub fn key_combo(&self, keys: &[&str]) -> bool {
+        if keys.len() < 2 { return false; }
+        let mut mods = Vec::with_capacity(keys.len() - 1);
+        for modifier in &keys[..keys.len() - 1] {
+            let code = match modifier.to_ascii_lowercase().as_str() {
+                "cmd" | "command" | "meta" => 227,
+                "shift" => 225,
+                "alt" | "option" => 226,
+                "ctrl" | "control" => 224,
+                _ => return false,
+            };
+            if !mods.contains(&code) { mods.push(code); }
         }
+        let Some(code) = key_code(keys[keys.len() - 1]) else { return false };
+        self.inner.input(Raw::Cmd(HidCmd::KeyCombo { code, mods }));
+        true
+    }
+
+    /// Type text. Non-ASCII uses the simulator pasteboard, so the app sees a paste action.
+    pub fn text(&self, s: &str) {
+        if s.is_ascii() {
+            if !s.is_empty() {
+                self.inner.input(Raw::Cmd(HidCmd::Text(s.to_string())));
+            }
+        } else {
+            match crate::devices::clipboard_write(&self.inner.udid, s) {
+                Ok(()) => { self.key_combo(&["cmd", "v"]); }
+                Err(e) => self.inner.shared.note(format!("non-ASCII paste failed: {e}")),
+            }
+        }
+    }
+
+    /// Read text from this simulator's pasteboard.
+    pub fn clipboard_read(&self) -> Result<String, Error> {
+        crate::devices::clipboard_read(&self.inner.udid)
+    }
+
+    /// Write text to this simulator's pasteboard. An empty string clears it.
+    pub fn clipboard_write(&self, text: &str) -> Result<(), Error> {
+        crate::devices::clipboard_write(&self.inner.udid, text)
+    }
+
+    pub fn open_url(&self, url: &str) -> Result<(), Error> {
+        crate::devices::open_url(&self.inner.udid, url)
+    }
+
+    pub fn launch(&self, bundle_id: &str) -> Result<(), Error> {
+        crate::devices::launch(&self.inner.udid, bundle_id)
+    }
+
+    pub fn terminate(&self, bundle_id: &str) -> Result<(), Error> {
+        crate::devices::terminate(&self.inner.udid, bundle_id)
+    }
+
+    pub fn set_location(&self, lat: f64, lon: f64) -> Result<(), Error> {
+        crate::devices::set_location(&self.inner.udid, lat, lon)
+    }
+
+    pub fn set_appearance(&self, appearance: crate::devices::Appearance) -> Result<(), Error> {
+        crate::devices::set_appearance(&self.inner.udid, appearance)
+    }
+
+    pub fn grant_permission(&self, service: &str, bundle_id: &str) -> Result<(), Error> {
+        crate::devices::grant_permission(&self.inner.udid, service, bundle_id)
+    }
+
+    pub fn revoke_permission(&self, service: &str, bundle_id: &str) -> Result<(), Error> {
+        crate::devices::revoke_permission(&self.inner.udid, service, bundle_id)
+    }
+
+    pub fn reset_permission(&self, service: &str, bundle_id: &str) -> Result<(), Error> {
+        crate::devices::reset_permission(&self.inner.udid, service, bundle_id)
+    }
+
+    pub fn set_content_size(&self, size: &str) -> Result<(), Error> {
+        crate::devices::set_content_size(&self.inner.udid, size)
+    }
+
+    pub fn status_bar_override(&self) -> Result<(), Error> {
+        crate::devices::status_bar_override(&self.inner.udid)
+    }
+
+    pub fn status_bar_clear(&self) -> Result<(), Error> {
+        crate::devices::status_bar_clear(&self.inner.udid)
+    }
+
+    pub fn push_notification(&self, bundle_id: &str, payload_path: &str) -> Result<(), Error> {
+        crate::devices::push_notification(&self.inner.udid, bundle_id, payload_path)
+    }
+
+    pub fn reset_keychain(&self) -> Result<(), Error> {
+        crate::devices::reset_keychain(&self.inner.udid)
+    }
+
+    /// List installed apps on this simulator, including system apps.
+    pub fn apps(&self) -> Result<Vec<crate::devices::App>, Error> {
+        crate::devices::list_apps(&self.inner.udid)
+    }
+
+    /// Explicitly erase an app's saved data and terminate it first.
+    pub fn clear_app_data(&self, bundle_id: &str) -> Result<(), Error> {
+        crate::devices::clear_app_data(&self.inner.udid, bundle_id)
     }
 
     /// Press `b` `presses` times (2 = double press), holding each `hold_secs` (0 = a tap).
@@ -891,6 +1042,9 @@ mod tests {
         assert_eq!(key_code("ArrowLeft"), Some(80));
         assert_eq!(key_code("UP"), Some(82));
         assert_eq!(key_code("delete"), Some(76));
+        assert_eq!(key_code("Home"), Some(74));
+        assert_eq!(key_code("pageup"), Some(75));
+        assert_eq!(key_code("a"), Some(4));
         assert_eq!(key_code("f1"), None);
         assert_eq!(key_code(""), None);
     }
@@ -1038,6 +1192,8 @@ mod tests {
         d.pointer(Phase::Move, 0.6, 0.25, Modifiers::default());
         d.pointer(Phase::Up, 2.0, -1.0, Modifiers::default()); // outside the box: clamps
         assert!(d.key("Enter"));
+        assert!(d.key("cmd+a"));
+        assert!(d.key_combo(&["shift", "a"]));
         assert!(!d.key("nope"));
         d.button(Button::Home, 2, 0.0);
         d.text("hi");
@@ -1045,7 +1201,7 @@ mod tests {
         assert!(rig.hid_log().is_empty(), "nothing reaches sdhid before ready");
         std::fs::write(rig.dir.join("go"), b"").unwrap();
         log.wait_state(State::Live, 1);
-        let got = rig.wait_hid_log(6);
+        let got = rig.wait_hid_log(8);
         let touch = |p, x: f64, y: f64| HidCmd::Touch { phase: p, x, y, edge: crate::protocol::Edge::None }.to_line();
         assert_eq!(
             got,
@@ -1054,15 +1210,17 @@ mod tests {
                 touch(Phase::Move, 393.0 * 0.6, 213.0),
                 touch(Phase::Up, 393.0, 0.0),
                 HidCmd::Key { code: 40 }.to_line(),
+                HidCmd::KeyCombo { code: 4, mods: vec![227] }.to_line(),
+                HidCmd::KeyCombo { code: 4, mods: vec![225] }.to_line(),
                 HidCmd::Button { name: "HOME", presses: 2, hold_secs: 0.0 }.to_line(),
                 HidCmd::Text("hi".into()).to_line(),
             ]
         );
         // Once ready, input goes straight through.
         d.pointer(Phase::Down, 0.5, 0.5, Modifiers { alt: true, ..Modifiers::default() });
-        let got = rig.wait_hid_log(7);
+        let got = rig.wait_hid_log(9);
         assert_eq!(
-            got[6],
+            got[8],
             HidCmd::Touch2 { phase: Phase::Down, x1: 146.5, y1: 426.0, x2: 246.5, y2: 426.0 }.to_line()
         );
     }
@@ -1185,6 +1343,24 @@ mod tests {
                 t2(Phase::Up, 196.5, 213.0, 196.5, 639.0),
             ]
         );
+    }
+
+    #[test]
+    fn long_press_and_drag_emit_ordered_pointer_phases() {
+        let rig = Rig::new("long-press-drag", true);
+        let log = Log::default();
+        let d = rig.start("fake-long-press-drag", &log).unwrap();
+        log.wait_state(State::Live, 1);
+        d.long_press(0.25, 0.5, Duration::ZERO);
+        d.drag(0.25, 0.5, 0.75, 0.5, Duration::ZERO, Duration::ZERO);
+        let touch = |phase, x, y| HidCmd::Touch { phase, x, y, edge: crate::protocol::Edge::None }.to_line();
+        let got = rig.wait_hid_log(6);
+        assert_eq!(got[0], touch(Phase::Down, 98.25, 426.0));
+        assert_eq!(got[1], touch(Phase::Up, 98.25, 426.0));
+        assert_eq!(got[2], touch(Phase::Down, 98.25, 426.0));
+        assert_eq!(got[3], touch(Phase::Move, 196.5, 426.0));
+        assert_eq!(got[4], touch(Phase::Move, 294.75, 426.0));
+        assert_eq!(got[5], touch(Phase::Up, 294.75, 426.0));
     }
 
     #[test]

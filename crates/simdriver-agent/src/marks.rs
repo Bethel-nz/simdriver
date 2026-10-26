@@ -52,6 +52,8 @@ pub struct Element {
     pub label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
     #[serde(rename = "id", skip_serializing_if = "Option::is_none")]
     pub identifier: Option<String>,
     /// `[x, y, width, height]` in screen points, as reported (may extend off screen).
@@ -138,6 +140,7 @@ pub fn elements(root: &AxNode, screen: (f64, f64)) -> (Vec<Element>, usize) {
             role: n.role.strip_prefix("AX").unwrap_or(&n.role).to_ascii_lowercase(),
             label: n.label.clone(),
             value: n.value.clone(),
+            placeholder: n.placeholder.clone(),
             identifier: n.identifier.clone(),
             frame: n.frame,
             tap,
@@ -189,6 +192,7 @@ pub(crate) mod tests {
             role: role.into(),
             label: (!label.is_empty()).then(|| label.into()),
             value: None,
+            placeholder: None,
             identifier: None,
             enabled: true,
             frame,

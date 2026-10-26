@@ -19,7 +19,7 @@ mod marks;
 mod steps;
 
 pub use marks::{Element, Visibility};
-pub use steps::{Step, StepFailure};
+pub use steps::{Step, StepFailure, SwipeTarget};
 
 use serde::Serialize;
 use simdriver::{AxNode, Button, Driver, Frame, Grid};
@@ -45,6 +45,7 @@ const SETTLE_DEFAULT: Duration = Duration::from_secs(10);
 const FOCUS_WAIT: Duration = Duration::from_millis(300);
 const WAIT_FOR_DEFAULT: Duration = Duration::from_secs(5);
 const CAPTURE_WAIT: Duration = Duration::from_secs(1);
+/// Held at a drag's start so iOS treats the stroke as a drag, not a scroll.
 /// A scroll drags this share of the region, over this long (slow enough to not fling far).
 const SCROLL_SHARE: f64 = 0.5;
 const SCROLL_TIME: Duration = Duration::from_millis(350);
@@ -67,9 +68,92 @@ pub trait Device: Send + Sync {
     fn long_press(&self, x: f64, y: f64, hold: Duration);
     /// One finger from `from` to `to` (0..1 of the screen) over `duration`.
     fn swipe(&self, from: (f64, f64), to: (f64, f64), duration: Duration);
+    /// A drag: down at `from`, hold `hold`, move to `to` over `duration`, lift.
+    fn drag(&self, from: (f64, f64), to: (f64, f64), source_hold: Duration, duration: Duration, destination_hold: Duration);
+    /// Place two fingers at exact box points for pinch and rotation gestures.
+    fn touch2(&self, phase: simdriver::Phase, a: (f64, f64), b: (f64, f64));
+    /// Pinch around a point in 0..1 screen coordinates. Keeps both fingers on-screen.
+    fn pinch(&self, center: (f64, f64), scale: f64) -> Result<(), AgentError> {
+        let (w, h) = self.screen_points().ok_or_else(|| AgentError::NotReady("screen size is not ready".into()))?;
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(AgentError::Invalid("pinch scale must be a positive finite number".into()));
+        }
+        let scale = scale.clamp(0.25, 4.0);
+        let (cx, cy) = (center.0 * w, center.1 * h);
+        let room = cx.min(w - cx).min(cy).min(h - cy);
+        let radius = 50.0_f64.min(room / scale.max(1.0));
+        if radius < 1.0 {
+            return Err(AgentError::Invalid("pinch target is too close to the screen edge".into()));
+        }
+        let points = |r: f64| ((cx - r) / w, cy / h, (cx + r) / w, cy / h);
+        let (x1, y1, x2, y2) = points(radius);
+        self.touch2(simdriver::Phase::Down, (x1, y1), (x2, y2));
+        let (x1, y1, x2, y2) = points(radius * scale);
+        self.touch2(simdriver::Phase::Move, (x1, y1), (x2, y2));
+        self.touch2(simdriver::Phase::Up, (x1, y1), (x2, y2));
+        Ok(())
+    }
+    /// Combined two-finger transform. Translation uses screen fractions; scale is a ratio.
+    fn transform(&self, center: (f64, f64), dx: f64, dy: f64, scale: f64, degrees: f64, duration: Duration) -> Result<(), AgentError> {
+        let (w, h) = self.screen_points().ok_or_else(|| AgentError::NotReady("screen size is not ready".into()))?;
+        if ![dx, dy, scale, degrees].iter().all(|v| v.is_finite()) || scale <= 0.0 {
+            return Err(AgentError::Invalid("transform values must be finite and scale positive".into()));
+        }
+        let scale = scale.clamp(0.25, 4.0);
+        let (cx, cy) = (center.0 * w, center.1 * h);
+        let (tx, ty) = (cx + dx * w, cy + dy * h);
+        let room = cx.min(w - cx).min(cy).min(h - cy)
+            .min(tx).min(w - tx).min(ty).min(h - ty) / scale.max(1.0);
+        let radius = 50.0_f64.min(room);
+        if radius < 1.0 { return Err(AgentError::Invalid("transform target is too close to a screen edge".into())); }
+        let start = ((cx - radius) / w, cy / h, (cx + radius) / w, cy / h);
+        self.touch2(simdriver::Phase::Down, (start.0, start.1), (start.2, start.3));
+        let steps = (duration.as_millis() / 16).max(1) as u32;
+        let mut end = start;
+        for i in 1..=steps {
+            thread::sleep(duration / steps);
+            let t = f64::from(i) / f64::from(steps);
+            let (px, py, r, a) = (cx + dx * w * t, cy + dy * h * t, radius * (1.0 + (scale - 1.0) * t), degrees.to_radians() * t);
+            end = ((px - r * a.cos()) / w, (py - r * a.sin()) / h, (px + r * a.cos()) / w, (py + r * a.sin()) / h);
+            self.touch2(simdriver::Phase::Move, (end.0, end.1), (end.2, end.3));
+        }
+        self.touch2(simdriver::Phase::Up, (end.0, end.1), (end.2, end.3));
+        Ok(())
+    }
+    /// Rotate two fingers around a point in 0..1 screen coordinates.
+    fn rotate(&self, center: (f64, f64), degrees: f64) -> Result<(), AgentError> {
+        let (w, h) = self.screen_points().ok_or_else(|| AgentError::NotReady("screen size is not ready".into()))?;
+        if !degrees.is_finite() {
+            return Err(AgentError::Invalid("rotation degrees must be finite".into()));
+        }
+        let (cx, cy) = (center.0 * w, center.1 * h);
+        let radius = 50.0_f64.min(cx).min(w - cx).min(cy).min(h - cy);
+        if radius < 1.0 {
+            return Err(AgentError::Invalid("rotation target is too close to the screen edge".into()));
+        }
+        let angle = degrees.to_radians();
+        let start = ((cx - radius) / w, cy / h, (cx + radius) / w, cy / h);
+        let end = (
+            (cx - radius * angle.cos()) / w,
+            (cy - radius * angle.sin()) / h,
+            (cx + radius * angle.cos()) / w,
+            (cy + radius * angle.sin()) / h,
+        );
+        self.touch2(simdriver::Phase::Down, (start.0, start.1), (start.2, start.3));
+        self.touch2(simdriver::Phase::Move, (end.0, end.1), (end.2, end.3));
+        self.touch2(simdriver::Phase::Up, (end.0, end.1), (end.2, end.3));
+        Ok(())
+    }
     fn text(&self, s: &str);
     fn key(&self, name: &str) -> bool;
     fn button(&self, b: Button);
+    fn open_url(&self, url: &str) -> Result<(), simdriver::Error>;
+    fn launch(&self, bundle_id: &str) -> Result<(), simdriver::Error>;
+    fn terminate(&self, bundle_id: &str) -> Result<(), simdriver::Error>;
+    fn set_location(&self, lat: f64, lon: f64) -> Result<(), simdriver::Error>;
+    fn set_appearance(&self, appearance: simdriver::Appearance) -> Result<(), simdriver::Error>;
+    fn clipboard_read(&self) -> Result<String, simdriver::Error>;
+    fn clipboard_write(&self, text: &str) -> Result<(), simdriver::Error>;
 }
 
 impl Device for Driver {
@@ -87,6 +171,16 @@ impl Device for Driver {
     }
     fn long_press(&self, x: f64, y: f64, hold: Duration) {
         Driver::long_press(self, x, y, hold)
+    }
+    fn drag(&self, from: (f64, f64), to: (f64, f64), source_hold: Duration, duration: Duration, destination_hold: Duration) {
+        Driver::drag_with_holds(self, from, to, simdriver::DragTiming {
+            source_hold,
+            movement: duration,
+            destination_hold,
+        })
+    }
+    fn touch2(&self, phase: simdriver::Phase, a: (f64, f64), b: (f64, f64)) {
+        Driver::touch2(self, phase, a.0, a.1, b.0, b.1)
     }
     fn swipe(&self, from: (f64, f64), to: (f64, f64), duration: Duration) {
         let none = simdriver::Modifiers::default();
@@ -109,6 +203,15 @@ impl Device for Driver {
     fn button(&self, b: Button) {
         Driver::button(self, b, 1, 0.0)
     }
+    fn open_url(&self, url: &str) -> Result<(), simdriver::Error> { Driver::open_url(self, url) }
+    fn launch(&self, bundle_id: &str) -> Result<(), simdriver::Error> { Driver::launch(self, bundle_id) }
+    fn terminate(&self, bundle_id: &str) -> Result<(), simdriver::Error> { Driver::terminate(self, bundle_id) }
+    fn set_location(&self, lat: f64, lon: f64) -> Result<(), simdriver::Error> { Driver::set_location(self, lat, lon) }
+    fn set_appearance(&self, appearance: simdriver::Appearance) -> Result<(), simdriver::Error> {
+        Driver::set_appearance(self, appearance)
+    }
+    fn clipboard_read(&self) -> Result<String, simdriver::Error> { Driver::clipboard_read(self) }
+    fn clipboard_write(&self, text: &str) -> Result<(), simdriver::Error> { Driver::clipboard_write(self, text) }
 }
 
 impl<D: Device + ?Sized> Device for Arc<D> {
@@ -130,6 +233,12 @@ impl<D: Device + ?Sized> Device for Arc<D> {
     fn swipe(&self, from: (f64, f64), to: (f64, f64), duration: Duration) {
         (**self).swipe(from, to, duration)
     }
+    fn drag(&self, from: (f64, f64), to: (f64, f64), source_hold: Duration, duration: Duration, destination_hold: Duration) {
+        (**self).drag(from, to, source_hold, duration, destination_hold)
+    }
+    fn touch2(&self, phase: simdriver::Phase, a: (f64, f64), b: (f64, f64)) {
+        (**self).touch2(phase, a, b)
+    }
     fn text(&self, s: &str) {
         (**self).text(s)
     }
@@ -139,6 +248,15 @@ impl<D: Device + ?Sized> Device for Arc<D> {
     fn button(&self, b: Button) {
         (**self).button(b)
     }
+    fn open_url(&self, url: &str) -> Result<(), simdriver::Error> { (**self).open_url(url) }
+    fn launch(&self, bundle_id: &str) -> Result<(), simdriver::Error> { (**self).launch(bundle_id) }
+    fn terminate(&self, bundle_id: &str) -> Result<(), simdriver::Error> { (**self).terminate(bundle_id) }
+    fn set_location(&self, lat: f64, lon: f64) -> Result<(), simdriver::Error> { (**self).set_location(lat, lon) }
+    fn set_appearance(&self, appearance: simdriver::Appearance) -> Result<(), simdriver::Error> {
+        (**self).set_appearance(appearance)
+    }
+    fn clipboard_read(&self) -> Result<String, simdriver::Error> { (**self).clipboard_read() }
+    fn clipboard_write(&self, text: &str) -> Result<(), simdriver::Error> { (**self).clipboard_write(text) }
 }
 
 /// Why an action was refused. The text tells the model what to do next.
@@ -154,6 +272,10 @@ pub enum AgentError {
     NotReady(String),
     /// A malformed step (unknown key or button).
     Invalid(String),
+    NotTextInput(String),
+    CommitNotObserved,
+    ClearNotObserved,
+    KeyboardOccludes,
     Device(simdriver::Error),
 }
 
@@ -166,6 +288,10 @@ impl AgentError {
             AgentError::NotFound(_) => "not-found",
             AgentError::NotReady(_) => "not-ready",
             AgentError::Invalid(_) => "invalid",
+            AgentError::NotTextInput(_) => "not-text-input",
+            AgentError::CommitNotObserved => "commit-not-observed",
+            AgentError::ClearNotObserved => "clear-not-observed",
+            AgentError::KeyboardOccludes => "keyboard-occludes",
             AgentError::Device(_) => "device",
         }
     }
@@ -178,7 +304,11 @@ impl fmt::Display for AgentError {
             | AgentError::Covered(m)
             | AgentError::NotFound(m)
             | AgentError::NotReady(m)
-            | AgentError::Invalid(m) => write!(f, "{}: {m}", self.code()),
+            | AgentError::Invalid(m)
+            | AgentError::NotTextInput(m) => write!(f, "{}: {m}", self.code()),
+            AgentError::CommitNotObserved | AgentError::ClearNotObserved | AgentError::KeyboardOccludes => {
+                write!(f, "{}", self.code())
+            }
             AgentError::Device(e) => write!(f, "device: {e}"),
         }
     }
@@ -264,8 +394,31 @@ pub struct StepsReport {
     /// Steps that ran to completion.
     pub completed: usize,
     pub failed: Option<StepFailure>,
+    /// Verification result for each fill step that completed, in order.
+    pub verified: Vec<bool>,
+    /// Values returned by clipboardRead steps, in order.
+    pub clipboard: Vec<String>,
+    /// Cropped PNG images requested by screenshotElement steps.
+    pub screenshots: Vec<ElementScreenshot>,
+    /// Alerts returned by alert steps or accepted open prompts.
+    pub alerts: Vec<AlertInfo>,
     /// The screen after the run (or after the failure), without an image.
     pub snapshot: Option<Snapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElementScreenshot {
+    pub target: String,
+    pub png: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlertInfo {
+    pub title: Option<String>,
+    pub message: Option<String>,
+    pub buttons: Vec<String>,
 }
 
 pub struct Agent<D: Device> {
@@ -275,6 +428,11 @@ pub struct Agent<D: Device> {
     refs: Mutex<Refs>,
     /// The screen as it was when the agent last acted, until accessibility shows a change.
     acted: Mutex<Option<Mark>>,
+    fill_results: Mutex<Vec<bool>>,
+    clipboard_results: Mutex<Vec<String>>,
+    screenshots: Mutex<Vec<ElementScreenshot>>,
+    secret_fields: Mutex<Vec<Element>>,
+    alerts: Mutex<Vec<AlertInfo>>,
 }
 
 /// What the screen looked like (tree and pixels) just before an action.
@@ -369,6 +527,11 @@ impl<D: Device> Agent<D> {
             next_id: AtomicU64::new(0),
             refs: Mutex::default(),
             acted: Mutex::new(None),
+            fill_results: Mutex::default(),
+            clipboard_results: Mutex::default(),
+            screenshots: Mutex::default(),
+            secret_fields: Mutex::default(),
+            alerts: Mutex::default(),
         }
     }
 
@@ -610,6 +773,66 @@ impl<D: Device> Agent<D> {
         }
     }
 
+    /// Resolve `target` to a touch point in screen points, validated against the screen
+    /// now — the same rules as a tap, without touching: a ref is re-read and refused if
+    /// it moved or vanished; a label is found on a settled screen; a grid cell resolves
+    /// to its centre. `from_end` also refuses a covered element (a drag starts there).
+    fn locate(&self, target: &str, from_end: bool) -> Result<[f64; 2], AgentError> {
+        if is_ref(target) {
+            let key = target.to_ascii_lowercase();
+            let last = lock(&self.last)
+                .clone()
+                .ok_or_else(|| AgentError::NotReady("no snapshot yet: take one, then use its refs".into()))?;
+            let Some(el) = last.elements.iter().find(|e| e.reference == key) else {
+                return Err(match lock(&self.refs).issued.get(&key) {
+                    Some((name, seen)) => AgentError::Stale(format!(
+                        "{target} {name:?} (snapshot {seen}) is not on the current screen (snapshot {}); use the current refs",
+                        last.id
+                    )),
+                    None => AgentError::NotFound(format!("{target} was never issued; take a snapshot and use its refs")),
+                });
+            };
+            let screen = (last.screen[0], last.screen[1]);
+            let root = self.device.accessibility()?;
+            let (fresh, _) = marks::elements(&root, screen);
+            let now = fresh
+                .iter()
+                .filter(|f| f.same_identity(el))
+                .min_by(|a, b| a.moved_by(el).total_cmp(&b.moved_by(el)))
+                .ok_or_else(|| {
+                    AgentError::Stale(format!("{target} {:?} is no longer on screen; take a new snapshot", el.name()))
+                })?;
+            let moved = now.moved_by(el);
+            if moved > MOVE_TOLERANCE {
+                return Err(AgentError::Stale(format!(
+                    "{target} {:?} moved {moved:.0} pt since snapshot {}; take a new snapshot",
+                    el.name(),
+                    last.id
+                )));
+            }
+            return now.tap.ok_or_else(|| {
+                AgentError::Covered(format!("{target} {:?} is covered by another element", now.name()))
+            });
+        }
+        let screen = self.screen()?;
+        let (_, els, _, _) = self.settled(screen, SnapshotOptions::default().settle)?;
+        if let Some(el) = self.find(&els, target, false) {
+            if !from_end {
+                // Dropping onto an element needs a point, which a covered element still has.
+                let f = el.frame;
+                return Ok(el.tap.unwrap_or([f[0] + f[2] / 2.0, f[1] + f[3] / 2.0]));
+            }
+            return el.tap.ok_or_else(|| {
+                AgentError::Covered(format!("{target} {:?} is covered by another element", el.name()))
+            });
+        }
+        let cols = lock(&self.last).as_ref().map_or(Grid::DEFAULT_COLS, |s| s.grid.cols);
+        match Grid::new(screen, cols).center(target) {
+            Some((x, y)) => Ok([x * screen.0, y * screen.1]),
+            None => Err(AgentError::NotFound(format!("nothing on screen is called {target:?}"))),
+        }
+    }
+
     /// The element a label, identifier or value names: exact over partial, reachable
     /// first, text fields first for `fill`; of equal matches the first in tree order.
     fn find<'a>(&self, els: &'a [Element], target: &str, text_input: bool) -> Option<&'a Element> {
@@ -624,20 +847,115 @@ impl<D: Device> Agent<D> {
         els.iter().rev().filter(|e| rank(e).0 > 0).max_by_key(|e| rank(e))
     }
 
+    fn field_value(&self, seed: &Element, screen: (f64, f64)) -> Result<Option<String>, AgentError> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let root = self.device.accessibility()?;
+            let (fresh, _) = marks::elements(&root, screen);
+            let inputs = fresh.iter().filter(|e| e.takes_text()).collect::<Vec<_>>();
+            let field = inputs.iter().copied()
+                .filter(|e| e.same_identity(seed))
+                .min_by(|a, b| a.moved_by(seed).total_cmp(&b.moved_by(seed)))
+                .or_else(|| inputs.into_iter().min_by(|a, b| a.moved_by(seed).total_cmp(&b.moved_by(seed)))
+                    .filter(|e| e.moved_by(seed) < 80.0));
+            if let Some(field) = field { return Ok(field.value.clone()); }
+            if Instant::now() >= deadline { return Err(AgentError::CommitNotObserved); }
+            thread::sleep(POLL);
+        }
+    }
+
+    fn element_frame(&self, target: &str, screen: (f64, f64)) -> Result<[f64; 4], AgentError> {
+        if is_ref(target) {
+            let last = lock(&self.last)
+                .clone()
+                .ok_or_else(|| AgentError::NotReady("no snapshot yet: take one, then use its refs".into()))?;
+            let seed = last.elements.iter().find(|e| e.reference.eq_ignore_ascii_case(target))
+                .ok_or_else(|| AgentError::NotFound(format!("{target} was not in the last snapshot")))?;
+            let _ = self.locate(target, false)?;
+            let root = self.device.accessibility()?;
+            let (fresh, _) = marks::elements(&root, screen);
+            return fresh.iter().filter(|e| e.same_identity(seed)).min_by(|a, b| a.moved_by(seed).total_cmp(&b.moved_by(seed)))
+                .map(|e| e.frame).ok_or_else(|| AgentError::Stale(format!("{target} is no longer on screen")));
+        }
+        let (_, els, _, _) = self.settled(screen, SnapshotOptions::default().settle)?;
+        if let Some(e) = self.find(&els, target, false) { return Ok(e.frame); }
+        let cols = lock(&self.last).as_ref().map_or(Grid::DEFAULT_COLS, |s| s.grid.cols);
+        Grid::new(screen, cols).rect(target)
+            .map(|r| [r[0] * screen.0, r[1] * screen.1, r[2] * screen.0, r[3] * screen.1])
+            .ok_or_else(|| AgentError::NotFound(format!("nothing on screen is called {target:?}")))
+    }
+
+    fn fill(&self, target: &str, value: &str, secret: bool) -> Result<(), AgentError> {
+        let screen = self.screen()?;
+        let field = if is_ref(target) {
+            let last = lock(&self.last)
+                .clone()
+                .ok_or_else(|| AgentError::NotReady("no snapshot yet: take one, then use its refs".into()))?;
+            last.elements.iter().find(|e| e.reference.eq_ignore_ascii_case(target)).cloned()
+        } else {
+            let (_, els, _, _) = self.settled(screen, SnapshotOptions::default().settle)?;
+            self.find(&els, target, false).cloned()
+        }
+        .ok_or_else(|| AgentError::NotFound(format!("nothing on screen is called {target:?}")))?;
+        if !field.takes_text() {
+            return Err(AgentError::NotTextInput(target.to_string()));
+        }
+        if secret { lock(&self.secret_fields).push(field.clone()); }
+        self.act_on(target, true, None)?;
+        thread::sleep(FOCUS_WAIT);
+        if !self.device.key("cmd+a") || !self.device.key("backspace") {
+            return Err(AgentError::ClearNotObserved);
+        }
+        // Some system fields (Safari's address bar, Settings search) change their
+        // keyboard/input mode asynchronously after clearing.
+        thread::sleep(Duration::from_millis(500));
+        let cleared_value = self.field_value(&field, screen)?;
+        let is_empty = cleared_value.as_deref().is_none_or(str::is_empty)
+            || cleared_value.as_deref() == field.placeholder.as_deref();
+        if !is_empty {
+            return Err(AgentError::ClearNotObserved);
+        }
+        for chunk in value.chars().collect::<Vec<_>>().chunks(128) {
+            self.device.text(&chunk.iter().collect::<String>());
+            thread::sleep(Duration::from_millis(20));
+        }
+        thread::sleep(FOCUS_WAIT);
+        let final_value = self.field_value(&field, screen)?;
+        let verified = match final_value.as_deref() {
+            Some(actual) => actual == value && field.placeholder.as_deref() != Some(actual),
+            None if field.placeholder.is_some() => false,
+            None => return Err(AgentError::CommitNotObserved),
+        };
+        lock(&self.fill_results).push(verified);
+        Ok(())
+    }
+
+    fn accept_open_prompt(&self, screen: (f64, f64)) {
+        thread::sleep(Duration::from_millis(400));
+        let Ok(root) = self.device.accessibility() else { return; };
+        let Some(info) = alert_info(&root) else { return; };
+        let text = format!("{} {}", info.title.as_deref().unwrap_or(""), info.message.as_deref().unwrap_or(""));
+        if !text.to_ascii_lowercase().contains("open in") { return; }
+        let open = root.descendants().into_iter().find(|n| {
+            n.role.ends_with("Button") && n.label.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("open"))
+        });
+        if let Some(open) = open {
+            let (x, y) = open.center();
+            self.mark(None, screen, true);
+            self.device.tap(x / screen.0, y / screen.1);
+            lock(&self.alerts).push(info);
+        }
+    }
+
     fn run(&self, step: &Step) -> Result<(), AgentError> {
         match step {
             Step::Tap { target } => self.act_on(target, false, None).map(drop),
-            Step::Fill { target, value } => {
-                self.act_on(target, true, None)?;
-                thread::sleep(FOCUS_WAIT);
-                self.device.text(value);
-                Ok(())
-            }
+            Step::Fill { target, value, secret } => self.fill(target, value, *secret),
             Step::Scroll { direction, target } => {
                 let screen = self.screen()?;
                 // The region to drag in, in points: the target's visible part, else the
                 // middle of the screen (clear of the system edge zones).
-                let region = match target {
+                let mut region = match target {
                     // A ref names an element of the last snapshot (fresh reads number afresh).
                     Some(t) if is_ref(t) => lock(&self.last)
                         .as_ref()
@@ -652,6 +970,14 @@ impl<D: Device> Agent<D> {
                     }
                     None => [screen.0 * 0.1, screen.1 * 0.2, screen.0 * 0.8, screen.1 * 0.6],
                 };
+                let root = self.device.accessibility()?;
+                if let Some(keyboard) = keyboard_frame(&root, screen) {
+                    let bottom = (keyboard[1] - region[1]).min(region[3]);
+                    if bottom < 64.0 {
+                        return Err(AgentError::KeyboardOccludes);
+                    }
+                    region[3] = bottom;
+                }
                 let (cx, cy) = (region[0] + region[2] / 2.0, region[1] + region[3] / 2.0);
                 let (dx, dy) = (region[2] * SCROLL_SHARE / 2.0, region[3] * SCROLL_SHARE / 2.0);
                 // Revealing what is below drags the content up, and so on.
@@ -665,6 +991,244 @@ impl<D: Device> Agent<D> {
                 self.mark(None, screen, false);
                 let n = |x: f64, y: f64| (x / screen.0, y / screen.1);
                 self.device.swipe(n(x0, y0), n(x1, y1), SCROLL_TIME);
+                Ok(())
+            }
+            Step::Drag { from, to, source_hold_ms, move_ms, destination_hold_ms } => {
+                let screen = self.screen()?;
+                let a = self.locate(from, true)?;
+                let b = self.locate(to, false)?;
+                self.mark(None, screen, false);
+                let n = |p: [f64; 2]| (p[0] / screen.0, p[1] / screen.1);
+                self.device.drag(
+                    n(a),
+                    n(b),
+                    Duration::from_millis(source_hold_ms.unwrap_or(800)),
+                    Duration::from_millis(move_ms.unwrap_or(500)),
+                    Duration::from_millis(destination_hold_ms.unwrap_or(0)),
+                );
+                Ok(())
+            }
+            Step::Pinch { target, scale } => {
+                let screen = self.screen()?;
+                let center = match target {
+                    Some(target) => {
+                        let p = self.locate(target, false)?;
+                        (p[0] / screen.0, p[1] / screen.1)
+                    }
+                    None => (0.5, 0.5),
+                };
+                self.mark(None, screen, false);
+                self.device.pinch(center, *scale)
+            }
+            Step::Rotate { target, degrees } => {
+                let screen = self.screen()?;
+                let center = match target {
+                    Some(target) => {
+                        let p = self.locate(target, false)?;
+                        (p[0] / screen.0, p[1] / screen.1)
+                    }
+                    None => (0.5, 0.5),
+                };
+                self.mark(None, screen, false);
+                self.device.rotate(center, *degrees)
+            }
+            Step::OpenUrl { url } => {
+                let screen = self.screen()?;
+                self.mark(None, screen, true);
+                self.device.open_url(url).map_err(AgentError::Device)?;
+                self.accept_open_prompt(screen);
+                Ok(())
+            }
+            Step::Launch { bundle_id } => {
+                let screen = self.screen()?;
+                self.mark(None, screen, true);
+                self.device.launch(bundle_id).map_err(AgentError::Device)
+            }
+            Step::Terminate { bundle_id } => {
+                let screen = self.screen()?;
+                self.mark(None, screen, true);
+                self.device.terminate(bundle_id).map_err(AgentError::Device)
+            }
+            Step::SetLocation { lat, lon } => {
+                let screen = self.screen()?;
+                self.mark(None, screen, false);
+                self.device.set_location(*lat, *lon).map_err(AgentError::Device)
+            }
+            Step::Appearance { appearance } => {
+                let screen = self.screen()?;
+                let mode = match appearance.to_ascii_lowercase().as_str() {
+                    "light" => simdriver::Appearance::Light,
+                    "dark" => simdriver::Appearance::Dark,
+                    _ => return Err(AgentError::Invalid("appearance must be light or dark".into())),
+                };
+                self.mark(None, screen, false);
+                self.device.set_appearance(mode).map_err(AgentError::Device)
+            }
+            Step::ClipboardRead => {
+                let screen = self.screen()?;
+                self.mark(None, screen, false);
+                let value = self.device.clipboard_read().map_err(AgentError::Device)?;
+                lock(&self.clipboard_results).push(value);
+                Ok(())
+            }
+            Step::ClipboardWrite { text } => {
+                let screen = self.screen()?;
+                self.mark(None, screen, false);
+                self.device.clipboard_write(text).map_err(AgentError::Device)
+            }
+            Step::KeyboardDismiss => {
+                let screen = self.screen()?;
+                let root = self.device.accessibility()?;
+                let Some(frame) = keyboard_frame(&root, screen) else { return Ok(()); };
+                let done = root.descendants().into_iter().find(|n| {
+                    n.role.ends_with("Button") && n.label.as_deref().is_some_and(|s| {
+                        matches!(s.to_ascii_lowercase().as_str(), "done" | "return" | "go" | "search" | "next" | "close")
+                    })
+                });
+                self.mark(None, screen, false);
+                if let Some(button) = done {
+                    let (x, y) = button.center();
+                    self.device.tap(x / screen.0, y / screen.1);
+                } else {
+                    self.device.key("enter");
+                }
+                thread::sleep(FOCUS_WAIT);
+                let root = self.device.accessibility()?;
+                if keyboard_frame(&root, screen).is_some() {
+                    let x = (frame[0] + frame[2] / 2.0) / screen.0;
+                    let y = (frame[1] - 80.0).max(8.0) / screen.1;
+                    self.device.tap(x, y);
+                    thread::sleep(FOCUS_WAIT);
+                    let root = self.device.accessibility()?;
+                    if keyboard_frame(&root, screen).is_some() {
+                        return Err(AgentError::NotReady("on-screen keyboard is still visible".into()));
+                    }
+                }
+                Ok(())
+            }
+            Step::Back { mode } => {
+                let screen = self.screen()?;
+                match mode.to_ascii_lowercase().as_str() {
+                    "system" => {
+                        self.mark(None, screen, true);
+                        self.device.swipe((0.002, 0.5), (0.75, 0.5), Duration::from_millis(450));
+                        Ok(())
+                    }
+                    "inapp" => {
+                        let root = self.device.accessibility()?;
+                        let (els, _) = marks::elements(&root, screen);
+                        let navigation = els.iter().filter(|e| e.role == "button")
+                            .filter(|e| e.frame[0] < screen.0 * 0.5 && e.frame[1] < screen.1 * 0.18)
+                            .filter(|e| e.label.as_deref().is_some_and(|s| !s.trim().is_empty()))
+                            .collect::<Vec<_>>();
+                        let back = navigation.iter().copied()
+                            .find(|e| e.label.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("back")))
+                            .or_else(|| navigation.into_iter().min_by(|a, b| a.frame[0].total_cmp(&b.frame[0])));
+                        let Some(back) = back else { return Err(AgentError::NotFound("in-app back button not found".into())); };
+                        self.mark(None, screen, false);
+                        let p = back.tap.ok_or_else(|| AgentError::Covered("in-app back button is covered".into()))?;
+                        self.device.tap(p[0] / screen.0, p[1] / screen.1);
+                        Ok(())
+                    }
+                    _ => Err(AgentError::Invalid("back mode must be system or inApp".into())),
+                }
+            }
+            Step::AppSwitcher => {
+                let screen = self.screen()?;
+                self.mark(None, screen, true);
+                self.device.button(Button::Home);
+                thread::sleep(Duration::from_millis(150));
+                self.device.button(Button::Home);
+                Ok(())
+            }
+            Step::ScreenshotElement { target } => {
+                let screen = self.screen()?;
+                let rect = self.element_frame(target, screen)?;
+                let frame = self.device.capture(CAPTURE_WAIT).ok_or(AgentError::CommitNotObserved)?;
+                let png = draw::crop(&frame, screen, rect).ok_or(AgentError::CommitNotObserved)?;
+                lock(&self.screenshots).push(ElementScreenshot { target: target.clone(), png });
+                Ok(())
+            }
+            Step::Alert { op, ms } => {
+                let screen = self.screen()?;
+                let deadline = Instant::now() + Duration::from_millis(ms.unwrap_or(5000));
+                let root = loop {
+                    let root = self.device.accessibility()?;
+                    if alert_info(&root).is_some() { break root; }
+                    if op.eq_ignore_ascii_case("wait") && Instant::now() < deadline {
+                        thread::sleep(POLL);
+                        continue;
+                    }
+                    return Err(AgentError::NotFound("no system alert is visible".into()));
+                };
+                let info = alert_info(&root).expect("checked above");
+                match op.to_ascii_lowercase().as_str() {
+                    "get" | "wait" => lock(&self.alerts).push(info),
+                    "accept" | "dismiss" => {
+                        let accepted = op.eq_ignore_ascii_case("accept");
+                        let button = alert_button(&root, accepted)
+                            .ok_or_else(|| AgentError::NotFound(if accepted { "no recognized allow/accept button" } else { "no safe dismiss button match" }.into()))?;
+                        self.mark(None, screen, true);
+                        let (x, y) = button.center();
+                        self.device.tap(x / screen.0, y / screen.1);
+                        lock(&self.alerts).push(info);
+                    }
+                    _ => return Err(AgentError::Invalid("alert op must be get, wait, accept, or dismiss".into())),
+                }
+                Ok(())
+            }
+            Step::Pan { target, dx, dy, ms } => {
+                let screen = self.screen()?;
+                let center = match target {
+                    Some(target) => { let p = self.locate(target, false)?; (p[0] / screen.0, p[1] / screen.1) }
+                    None => (0.5, 0.5),
+                };
+                self.mark(None, screen, false);
+                self.device.transform(center, *dx, *dy, 1.0, 0.0, Duration::from_millis(ms.unwrap_or(500)))
+            }
+            Step::Transform { target, dx, dy, scale, degrees } => {
+                let screen = self.screen()?;
+                let center = match target {
+                    Some(target) => { let p = self.locate(target, false)?; (p[0] / screen.0, p[1] / screen.1) }
+                    None => (0.5, 0.5),
+                };
+                self.mark(None, screen, false);
+                self.device.transform(center, *dx, *dy, *scale, *degrees, Duration::from_millis(500))
+            }
+            Step::Fling { direction } => {
+                let screen = self.screen()?;
+                let (from, to) = match direction.to_ascii_lowercase().as_str() {
+                    "up" => ((0.5, 0.78), (0.5, 0.22)),
+                    "down" => ((0.5, 0.22), (0.5, 0.78)),
+                    "left" => ((0.8, 0.5), (0.2, 0.5)),
+                    "right" => ((0.2, 0.5), (0.8, 0.5)),
+                    other => return Err(AgentError::Invalid(format!("unknown direction {other:?} (up, down, left, right)"))),
+                };
+                self.mark(None, screen, false);
+                self.device.swipe(from, to, Duration::from_millis(150));
+                Ok(())
+            }
+            Step::Swipe { from, to, count, pause_ms } => {
+                let screen = self.screen()?;
+                let point = |target: &SwipeTarget| -> Result<(f64, f64), AgentError> {
+                    match target {
+                        SwipeTarget::Target(target) => {
+                            let p = self.locate(target, false)?;
+                            Ok((p[0] / screen.0, p[1] / screen.1))
+                        }
+                        SwipeTarget::Point([x, y]) if x.is_finite() && y.is_finite() && (0.0..=1.0).contains(x) && (0.0..=1.0).contains(y) => Ok((*x, *y)),
+                        SwipeTarget::Point(_) => Err(AgentError::Invalid("swipe points must be finite and within 0..1".into())),
+                    }
+                };
+                let from = point(from)?;
+                let to = point(to)?;
+                let count = count.unwrap_or(1);
+                if !(1..=10).contains(&count) { return Err(AgentError::Invalid("swipe count must be 1–10".into())); }
+                self.mark(None, screen, false);
+                for i in 0..count {
+                    self.device.swipe(from, to, Duration::from_millis(500));
+                    if i + 1 < count { thread::sleep(Duration::from_millis(pause_ms.unwrap_or(200))); }
+                }
                 Ok(())
             }
             Step::LongPress { target, ms } => {
@@ -715,24 +1279,105 @@ impl<D: Device> Agent<D> {
     /// Run `steps` in order; stop at the first failure. The report ends with a fresh
     /// snapshot (no image), which also becomes the one refs refer to.
     pub fn steps(&self, steps: &[Step]) -> StepsReport {
+        lock(&self.fill_results).clear();
+        lock(&self.clipboard_results).clear();
+        lock(&self.screenshots).clear();
+        lock(&self.secret_fields).clear();
+        lock(&self.alerts).clear();
         let mut failed = None;
         let mut completed = 0;
         for (index, step) in steps.iter().enumerate() {
             match self.run(step) {
                 Ok(()) => completed += 1,
                 Err(e) => {
-                    failed = Some(StepFailure { index, step: step.clone(), error: e.to_string() });
+                    let safe_step = match step {
+                        Step::Fill { target, secret: true, .. } => Step::Fill {
+                            target: target.clone(),
+                            value: "[redacted]".into(),
+                            secret: true,
+                        },
+                        _ => step.clone(),
+                    };
+                    failed = Some(StepFailure { index, step: safe_step, code: e.code().into(), error: e.to_string() });
                     break;
                 }
             }
         }
-        let snapshot = self.snapshot(&SnapshotOptions { image: false, ..SnapshotOptions::default() }).ok();
-        StepsReport { ok: failed.is_none(), completed, failed, snapshot }
+        let mut snapshot = self.snapshot(&SnapshotOptions { image: false, ..SnapshotOptions::default() }).ok();
+        if let Some(s) = snapshot.as_mut() {
+            let secrets = lock(&self.secret_fields);
+            for e in &mut s.elements {
+                if secrets.iter().any(|secret| e.same_identity(secret)) { e.value = None; }
+            }
+            s.text = describe(s.id, s.mode, (s.screen[0], s.screen[1]), &s.elements, s.offscreen, &Grid::new((s.screen[0], s.screen[1]), s.grid.cols), s.settled);
+        }
+        let verified = lock(&self.fill_results).clone();
+        let clipboard = lock(&self.clipboard_results).clone();
+        let screenshots = lock(&self.screenshots).clone();
+        let alerts = lock(&self.alerts).clone();
+        StepsReport { ok: failed.is_none(), completed, failed, verified, clipboard, screenshots, alerts, snapshot }
     }
 }
 
 fn quoted(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| format!("{s:?}"))
+}
+
+fn keyboard_frame(root: &AxNode, screen: (f64, f64)) -> Option<[f64; 4]> {
+    if let Some(n) = root.descendants().into_iter().find(|n| n.role.to_ascii_lowercase().contains("keyboard")) {
+        return Some(n.frame);
+    }
+    let keys: Vec<_> = root.descendants().into_iter().filter(|n| {
+        let y = n.frame[1];
+        y > screen.1 * 0.48 && n.frame[2] > 0.0 && n.frame[3] > 0.0
+            && (n.role.ends_with("Button") || n.role.ends_with("Key"))
+            && n.label.as_deref().is_some_and(|s| s.chars().count() <= 8)
+    }).collect();
+    if keys.len() < 8 { return None; }
+    let x0 = keys.iter().map(|n| n.frame[0]).fold(f64::INFINITY, f64::min);
+    let y0 = keys.iter().map(|n| n.frame[1]).fold(f64::INFINITY, f64::min);
+    let x1 = keys.iter().map(|n| n.frame[0] + n.frame[2]).fold(0.0, f64::max);
+    let y1 = keys.iter().map(|n| n.frame[1] + n.frame[3]).fold(0.0, f64::max);
+    Some([x0, y0, x1 - x0, y1 - y0])
+}
+
+fn alert_info(root: &AxNode) -> Option<AlertInfo> {
+    let all = root.descendants();
+    let alert = all.iter().find(|n| n.role.to_ascii_lowercase().contains("alert"));
+    let nodes = alert.map(|n| n.descendants()).unwrap_or_else(|| all.clone());
+    let texts: Vec<String> = nodes.iter().filter(|n| n.role.ends_with("StaticText"))
+        .filter_map(|n| n.label.clone().or_else(|| n.value.clone())).collect();
+    let buttons: Vec<String> = nodes.iter().filter(|n| n.role.ends_with("Button"))
+        .filter_map(|n| n.label.clone().or_else(|| n.value.clone())).collect();
+    if alert.is_none() {
+        // iOS 27 exposes Safari's permission sheet as three top-level buttons, without
+        // an AXAlert container. Require both an allow choice and a safe denial choice.
+        let labels: Vec<_> = buttons.iter().map(|s| normalized_alert_label(s)).collect();
+        let allow = labels.iter().any(|s| ["allow while using app", "allow once", "allow"].contains(&s.as_str()));
+        let deny = labels.iter().any(|s| s == "don't allow");
+        let open_prompt = labels.iter().any(|s| s == "open") && labels.iter().any(|s| s == "cancel");
+        if !(allow && deny) && !open_prompt { return None; }
+    }
+    Some(AlertInfo { title: texts.first().cloned(), message: (texts.len() > 1).then(|| texts[1..].join(" ")), buttons })
+}
+
+fn normalized_alert_label(s: &str) -> String {
+    s.to_ascii_lowercase().replace('’', "'")
+}
+
+fn alert_button(root: &AxNode, accepted: bool) -> Option<&AxNode> {
+    let rank = |n: &AxNode| {
+        let label = normalized_alert_label(n.label.as_deref().or(n.value.as_deref()).unwrap_or(""));
+        if accepted {
+            ["Allow While Using App", "Allow Once", "Allow", "OK", "Open", "Continue", "Done"]
+                .iter().position(|s| label == s.to_ascii_lowercase()).unwrap_or(usize::MAX)
+        } else if ["cancel", "don't allow", "ask app not to track", "not now"].iter().any(|s| label == *s) {
+            0
+        } else { usize::MAX }
+    };
+    root.descendants().into_iter().filter(|n| n.role.ends_with("Button"))
+        .map(|n| (rank(n), n)).filter(|(rank, _)| *rank != usize::MAX)
+        .min_by_key(|(rank, _)| *rank).map(|(_, n)| n)
 }
 
 /// The snapshot as the model reads it.
@@ -795,10 +1440,12 @@ fn describe(
 mod tests {
     use super::*;
     use crate::marks::tests::{node, settings};
+    use std::sync::atomic::AtomicBool;
 
     type OnTap = Box<dyn Fn(&Fake, f64, f64) + Send + Sync>;
     type OnButton = Box<dyn Fn(&Fake) + Send + Sync>;
     type Swipe = ((f64, f64), (f64, f64));
+    type Touch2 = (simdriver::Phase, (f64, f64), (f64, f64));
 
     /// A scripted device: `screen` is what accessibility reads; taps and typing are logged,
     /// and `on_tap` can change the screen (navigation).
@@ -808,10 +1455,14 @@ mod tests {
         long_presses: Mutex<Vec<(f64, f64, Duration)>>,
         typed: Mutex<Vec<String>>,
         swipes: Mutex<Vec<Swipe>>,
+        drags: Mutex<Vec<(Swipe, Duration, Duration, Duration)>>,
+        touch2: Mutex<Vec<Touch2>>,
         reads: AtomicU64,
         on_tap: Mutex<Option<OnTap>>,
         on_button: Mutex<Option<OnButton>>,
         frame: Mutex<Option<Frame>>,
+        focused: Mutex<Option<(f64, f64)>>,
+        selected: AtomicBool,
     }
 
     impl Fake {
@@ -822,14 +1473,28 @@ mod tests {
                 long_presses: Mutex::default(),
                 typed: Mutex::default(),
                 swipes: Mutex::default(),
+                drags: Mutex::default(),
+                touch2: Mutex::default(),
                 reads: AtomicU64::new(0),
                 on_tap: Mutex::new(None),
                 on_button: Mutex::new(None),
                 frame: Mutex::new(None),
+                focused: Mutex::new(None),
+                selected: AtomicBool::new(false),
             }
         }
         fn set(&self, screen: AxNode) {
             *lock(&self.screen) = screen;
+        }
+        fn set_field_value(node: &mut AxNode, x: f64, y: f64, value: String) -> bool {
+            if node.role.ends_with("TextField")
+                && x >= node.frame[0] && x <= node.frame[0] + node.frame[2]
+                && y >= node.frame[1] && y <= node.frame[1] + node.frame[3]
+            {
+                node.value = Some(value);
+                return true;
+            }
+            node.children.iter_mut().any(|c| Self::set_field_value(c, x, y, value.clone()))
         }
     }
 
@@ -846,6 +1511,7 @@ mod tests {
         }
         fn tap(&self, x: f64, y: f64) {
             lock(&self.taps).push((x, y));
+            *lock(&self.focused) = Some((x * 400.0, y * 800.0));
             if let Some(f) = lock(&self.on_tap).as_ref() {
                 f(self, x, y);
             }
@@ -856,17 +1522,50 @@ mod tests {
         fn swipe(&self, from: (f64, f64), to: (f64, f64), _: Duration) {
             lock(&self.swipes).push((from, to));
         }
+        fn drag(&self, from: (f64, f64), to: (f64, f64), source: Duration, duration: Duration, destination: Duration) {
+            lock(&self.drags).push(((from, to), source, duration, destination));
+        }
+        fn touch2(&self, phase: simdriver::Phase, a: (f64, f64), b: (f64, f64)) {
+            lock(&self.touch2).push((phase, a, b));
+        }
         fn text(&self, s: &str) {
             lock(&self.typed).push(s.to_string());
+            if let Some((x, y)) = *lock(&self.focused) {
+                let mut root = lock(&self.screen);
+                let old = root.descendants().into_iter().find(|n| {
+                    n.role.ends_with("TextField") && x >= n.frame[0] && x <= n.frame[0] + n.frame[2]
+                        && y >= n.frame[1] && y <= n.frame[1] + n.frame[3]
+                }).and_then(|n| n.value.clone()).unwrap_or_default();
+                let next = if self.selected.swap(false, Ordering::SeqCst) { s.to_string() } else { format!("{old}{s}") };
+                Self::set_field_value(&mut root, x, y, next);
+            }
         }
         fn key(&self, name: &str) -> bool {
-            name == "enter"
+            match name {
+                "cmd+a" => { self.selected.store(true, Ordering::SeqCst); true }
+                "backspace" => {
+                    if let Some((x, y)) = *lock(&self.focused) {
+                        Self::set_field_value(&mut lock(&self.screen), x, y, String::new());
+                        self.selected.store(false, Ordering::SeqCst);
+                        true
+                    } else { false }
+                }
+                "enter" => true,
+                _ => false,
+            }
         }
         fn button(&self, _: Button) {
             if let Some(f) = lock(&self.on_button).as_ref() {
                 f(self);
             }
         }
+        fn open_url(&self, _: &str) -> Result<(), simdriver::Error> { Ok(()) }
+        fn launch(&self, _: &str) -> Result<(), simdriver::Error> { Ok(()) }
+        fn terminate(&self, _: &str) -> Result<(), simdriver::Error> { Ok(()) }
+        fn set_location(&self, _: f64, _: f64) -> Result<(), simdriver::Error> { Ok(()) }
+        fn set_appearance(&self, _: simdriver::Appearance) -> Result<(), simdriver::Error> { Ok(()) }
+        fn clipboard_read(&self) -> Result<String, simdriver::Error> { Ok(String::new()) }
+        fn clipboard_write(&self, _: &str) -> Result<(), simdriver::Error> { Ok(()) }
     }
 
     fn solid(v: u8) -> Frame {
@@ -1125,7 +1824,7 @@ mod tests {
         }));
         let steps: Vec<Step> = serde_json::from_str(
             r#"[{"action":"fill","target":"Email","value":"ada@example.com"},
-                {"action":"fill","target":"password","value":"hunter2"},
+                {"action":"fill","target":"password","value":"hunter2","secret":true},
                 {"action":"tap","target":"Log in"},
                 {"action":"waitFor","text":"welcome back","timeoutMs":1000}]"#,
         )
@@ -1134,10 +1833,70 @@ mod tests {
         assert!(r.ok, "{:?}", r.failed);
         assert_eq!(r.completed, 4);
         assert_eq!(*lock(&a.device.typed), ["ada@example.com", "hunter2"]);
+        assert_eq!(r.verified, [true, true]);
         // "Email" matched the text field, not the static label above it.
         assert_eq!(lock(&a.device.taps)[0], (0.5, 122.0 / 800.0));
         let s = r.snapshot.unwrap();
         assert_eq!(s.mode, Mode::Grid, "the welcome screen has nothing to tap");
+    }
+
+    #[test]
+    fn secret_fill_is_redacted_from_step_and_snapshot_reports() {
+        let a = Agent::new(Fake::new(login()));
+        a.snapshot(&quick()).unwrap();
+        let r = a.steps(&[Step::Fill { target: "Password".into(), value: "never-echo-this".into(), secret: true }]);
+        assert!(r.ok, "{:?}", r.failed);
+        assert_eq!(r.verified, [true]);
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("never-echo-this"), "secret leaked in report: {json}");
+    }
+
+    #[test]
+    fn keyboard_dismisses_and_scrolls_above_keyboard() {
+        let mut screen = login();
+        screen.children.push(node("AXKeyboard", "Keyboard", [0.0, 500.0, 400.0, 300.0], vec![]));
+        let a = Agent::new(Fake::new(screen));
+        *lock(&a.device.on_tap) = Some(Box::new(|f: &Fake, _x, _y| f.set(login())));
+        let r = a.steps(&[
+            Step::Scroll { direction: "down".into(), target: None },
+            Step::KeyboardDismiss,
+        ]);
+        assert!(r.ok, "{:?}", r.failed);
+        let swipe = lock(&a.device.swipes)[0];
+        assert!(swipe.0.1 * 800.0 < 500.0 && swipe.1.1 * 800.0 < 500.0, "scroll entered keyboard: {swipe:?}");
+        assert!(keyboard_frame(&a.device.accessibility().unwrap(), (400.0, 800.0)).is_none());
+    }
+
+    #[test]
+    fn screenshot_element_returns_a_cropped_png() {
+        let a = Agent::new(Fake::new(login()));
+        *lock(&a.device.frame) = Some(Frame {
+            width: 400,
+            height: 800,
+            source_width: 400,
+            source_height: 800,
+            seq: 1,
+            data: vec![255; 400 * 800 * 4],
+        });
+        let r = a.steps(&[Step::ScreenshotElement { target: "Email".into() }]);
+        assert!(r.ok, "{:?}", r.failed);
+        assert_eq!(r.screenshots.len(), 1);
+        assert_eq!(&r.screenshots[0].png[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn alert_dismiss_refuses_unknown_buttons() {
+        let screen = node("AXApplication", "App", [0.0, 0.0, 400.0, 800.0], vec![node(
+            "AXAlert", "", [20.0, 300.0, 360.0, 180.0], vec![
+                node("AXStaticText", "Unrecognized prompt", [40.0, 320.0, 320.0, 30.0], vec![]),
+                node("AXButton", "Maybe later", [40.0, 400.0, 320.0, 44.0], vec![]),
+            ],
+        )]);
+        let a = Agent::new(Fake::new(screen));
+        let r = a.steps(&[Step::Alert { op: "dismiss".into(), ms: None }]);
+        assert!(!r.ok);
+        assert_eq!(r.failed.unwrap().code, "not-found");
+        assert!(lock(&a.device.taps).is_empty(), "unknown alert buttons must never be tapped");
     }
 
     #[test]
@@ -1156,6 +1915,59 @@ mod tests {
         assert_eq!(swipes[1], ((110.0 / 400.0, 265.0 / 800.0), (290.0 / 400.0, 265.0 / 800.0)));
         let r = a.steps(&[Step::Scroll { direction: "sideways".into(), target: None }]);
         assert!(r.failed.unwrap().error.starts_with("invalid: unknown direction"));
+    }
+
+    #[test]
+    fn drag_resolves_both_ends_and_holds_at_the_start() {
+        let a = Agent::new(Fake::new(login()));
+        a.snapshot(&quick()).unwrap();
+        let r = a.steps(&serde_json::from_str::<Vec<Step>>(
+            r#"[{"action":"drag","from":"Email","to":"Log in"},
+                {"action":"drag","from":"e1","to":"C4","ms":1200}]"#,
+        )
+        .unwrap());
+        assert!(r.ok, "{:?}", r.failed);
+        let drags = lock(&a.device.drags).clone();
+        assert_eq!(
+            drags,
+            [
+                (((0.5, 122.0 / 800.0), (0.5, 265.0 / 800.0)), Duration::from_millis(800), Duration::from_millis(500), Duration::ZERO),
+                (((0.5, 122.0 / 800.0), (400.0 * 3.5 / 6.0 / 400.0, 800.0 * 2.5 / 12.0 / 800.0)), Duration::from_millis(800), Duration::from_millis(1200), Duration::ZERO)
+            ]
+        );
+        // A covered start is refused; nothing drags.
+        let a2 = Agent::new(Fake::new(settings()));
+        a2.snapshot(&quick()).unwrap();
+        let r = a2.steps(&[Step::Drag {
+            from: "e3".into(), to: "General".into(), source_hold_ms: None,
+            move_ms: None, destination_hold_ms: None,
+        }]);
+        assert!(r.failed.unwrap().error.starts_with("covered: e3"));
+        assert!(lock(&a2.device.drags).is_empty());
+    }
+
+    #[test]
+    fn pinch_and_rotate_use_two_fingers_around_the_resolved_center() {
+        let a = Agent::new(Fake::new(settings()));
+        a.snapshot(&quick()).unwrap();
+        let r = a.steps(&serde_json::from_str::<Vec<Step>>(
+            r#"[{"action":"pinch","scale":2.0},
+                {"action":"rotate","target":"General","degrees":90}]"#,
+        )
+        .unwrap());
+        assert!(r.ok, "{:?}", r.failed);
+        let gestures = lock(&a.device.touch2).clone();
+        assert_eq!(gestures.len(), 6);
+        assert_eq!(gestures[0].0, simdriver::Phase::Down);
+        assert_eq!(gestures[1].0, simdriver::Phase::Move);
+        assert_eq!(gestures[2].0, simdriver::Phase::Up);
+        assert_eq!(gestures[3].0, simdriver::Phase::Down);
+        assert_eq!(gestures[4].0, simdriver::Phase::Move);
+        assert_eq!(gestures[5].0, simdriver::Phase::Up);
+        assert_eq!(gestures[0].1, (0.375, 0.5));
+        assert_eq!(gestures[0].2, (0.625, 0.5));
+        assert_eq!(gestures[1].1, (0.25, 0.5));
+        assert_eq!(gestures[1].2, (0.75, 0.5));
     }
 
     #[test]

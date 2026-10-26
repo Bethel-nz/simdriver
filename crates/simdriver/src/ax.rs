@@ -25,6 +25,8 @@ pub struct AxNode {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
     /// The app's `accessibilityIdentifier`, when it set one.
     #[serde(default, rename = "id", skip_serializing_if = "Option::is_none")]
     pub identifier: Option<String>,
@@ -261,6 +263,7 @@ mod tests {
             role: "AXButton".into(),
             label: Some("Go".into()),
             value: None,
+            placeholder: None,
             identifier: None,
             enabled: true,
             frame: [1.0, 2.0, 3.0, 4.0],

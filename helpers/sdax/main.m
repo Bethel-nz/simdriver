@@ -215,6 +215,8 @@ static NSDictionary *node(id element, int depth) {
     NSString *text = [value isKindOfClass:NSString.class] ? value : [value description];
     if (text.length > 0) out[@"value"] = text;
   }
+  NSString *placeholder = el.accessibilityPlaceholderValue;
+  if (placeholder.length > 0) out[@"placeholder"] = placeholder;
   NSString *identifier = el.accessibilityIdentifier;
   if (identifier.length > 0) out[@"id"] = identifier;
   out[@"enabled"] = @(el.isAccessibilityEnabled);

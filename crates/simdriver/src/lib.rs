@@ -22,8 +22,12 @@ mod shm;
 mod stats;
 
 pub use ax::AxNode;
-pub use devices::{boot, list_devices, shutdown, Device, DeviceSelector};
-pub use driver::{Button, Driver, Event, Modifiers, Options, State};
+pub use devices::{
+    boot, clear_app_data, clipboard_read, clipboard_write, grant_permission, launch, list_apps, list_devices, open_url, push_notification,
+    reset_keychain, reset_permission, revoke_permission, set_appearance, set_content_size, set_location,
+    shutdown, status_bar_clear, status_bar_override, terminate, App, Appearance, Device, DeviceSelector,
+};
+pub use driver::{Button, DragTiming, Driver, Event, Modifiers, Options, State};
 pub use error::Error;
 pub use gesture::ScrollPhase;
 pub use grid::Grid;

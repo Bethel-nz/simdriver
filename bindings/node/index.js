@@ -26,7 +26,7 @@ const modifiers = (mods) => ({
 
 // Agent refusals arrive as "code: message"; expose the code for hosts to branch on.
 const agentError = (e) => {
-  const m = /^(stale|covered|not-found|not-ready|invalid|device): /.exec(e?.message ?? '');
+  const m = /^(stale|covered|not-found|not-ready|invalid|device|not-text-input|commit-not-observed|clear-not-observed|keyboard-occludes): /.exec(e?.message ?? '');
   if (m) e.code = m[1];
   return e;
 };
@@ -61,7 +61,9 @@ class Agent {
   }
 
   async steps(steps) {
-    return JSON.parse(await this.#n.steps(JSON.stringify(steps)));
+    const report = JSON.parse(await this.#n.steps(JSON.stringify(steps)));
+    for (const screenshot of report.screenshots ?? []) screenshot.png = Buffer.from(screenshot.png);
+    return report;
   }
 }
 
@@ -172,8 +174,84 @@ class Driver {
     this.#n.longPress(x, y, ms);
   }
 
+  drag(x1, y1, x2, y2, opts) {
+    this.#n.drag(x1, y1, x2, y2, opts?.holdMs, opts?.moveMs, opts?.destinationHoldMs);
+  }
+
   key(name) {
     return this.#n.key(name);
+  }
+
+  keyCombo(keys) {
+    return this.#n.keyCombo(keys);
+  }
+
+  clipboardRead() {
+    return this.#n.clipboardRead();
+  }
+
+  clipboardWrite(text) {
+    return this.#n.clipboardWrite(text);
+  }
+
+  openUrl(url) {
+    return this.#n.openUrl(url);
+  }
+
+  launch(bundleId) {
+    return this.#n.launch(bundleId);
+  }
+
+  terminate(bundleId) {
+    return this.#n.terminate(bundleId);
+  }
+
+  setLocation(lat, lon) {
+    return this.#n.setLocation(lat, lon);
+  }
+
+  setAppearance(appearance) {
+    return this.#n.setAppearance(appearance);
+  }
+
+  grantPermission(service, bundleId) {
+    return this.#n.grantPermission(service, bundleId);
+  }
+
+  revokePermission(service, bundleId) {
+    return this.#n.revokePermission(service, bundleId);
+  }
+
+  resetPermission(service, bundleId) {
+    return this.#n.resetPermission(service, bundleId);
+  }
+
+  setContentSize(size) {
+    return this.#n.setContentSize(size);
+  }
+
+  statusBarOverride() {
+    return this.#n.statusBarOverride();
+  }
+
+  statusBarClear() {
+    return this.#n.statusBarClear();
+  }
+
+  pushNotification(bundleId, payloadPath) {
+    return this.#n.pushNotification(bundleId, payloadPath);
+  }
+
+  resetKeychain() {
+    return this.#n.resetKeychain();
+  }
+
+  apps() {
+    return this.#n.apps();
+  }
+
+  clearAppData(bundleId) {
+    return this.#n.clearAppData(bundleId);
   }
 
   text(s) {
@@ -196,6 +274,7 @@ class Driver {
 // One `exports.x =` per name: Node's ESM loader finds CommonJS named exports by
 // scanning for this shape, so `import { Driver } from 'simdriver'` works there too.
 exports.listDevices = native.listDevices;
+exports.listApps = native.listApps;
 exports.boot = native.boot;
 exports.shutdown = native.shutdown;
 exports.Driver = Driver;
