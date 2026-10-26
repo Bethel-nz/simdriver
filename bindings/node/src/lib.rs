@@ -82,6 +82,40 @@ impl Task for AxTask {
   }
 }
 
+/// Any blocking driver call (a `simctl` round trip, a held touch) off the JS thread, so
+/// frames keep flowing while it runs.
+pub struct Blocking<T: Send + 'static> {
+  f: Option<Box<dyn FnOnce() -> std::result::Result<T, sd::Error> + Send>>,
+}
+
+impl<T: Send + ToNapiValue + TypeName + 'static> Task for Blocking<T> {
+  type Output = T;
+  type JsValue = T;
+
+  fn compute(&mut self) -> Result<T> {
+    let f = self.f.take().ok_or_else(|| Error::from_reason("task already ran"))?;
+    f().map_err(to_napi)
+  }
+
+  fn resolve(&mut self, _env: Env, v: T) -> Result<T> {
+    Ok(v)
+  }
+}
+
+fn blocking<T: Send + ToNapiValue + TypeName + 'static>(
+  f: impl FnOnce() -> std::result::Result<T, sd::Error> + Send + 'static,
+) -> AsyncTask<Blocking<T>> {
+  AsyncTask::new(Blocking { f: Some(Box::new(f)) })
+}
+
+fn ms(v: f64) -> std::time::Duration {
+  std::time::Duration::from_secs_f64((v / 1000.0).max(0.0))
+}
+
+fn to_app(app: sd::App) -> App {
+  App { bundle_id: app.bundle_id, name: app.name, app_type: app.app_type }
+}
+
 type CoreAgent = agent::Agent<Arc<sd::Driver>>;
 
 fn agent_err(e: agent::AgentError) -> Error {
@@ -327,11 +361,7 @@ pub fn list_devices() -> Result<Vec<Device>> {
 
 #[napi]
 pub fn list_apps(udid: String) -> Result<Vec<App>> {
-  sd::list_apps(&udid).map_err(to_napi).map(|apps| apps.into_iter().map(|app| App {
-    bundle_id: app.bundle_id,
-    name: app.name,
-    app_type: app.app_type,
-  }).collect())
+  sd::list_apps(&udid).map_err(to_napi).map(|apps| apps.into_iter().map(to_app).collect())
 }
 
 #[napi]
@@ -579,21 +609,29 @@ impl Driver {
     self.core.tap(x, y);
   }
 
-  #[napi]
-  pub fn double_tap(&self, x: f64, y: f64) {
-    self.core.double_tap(x, y);
+  /// Two taps 100 ms apart. Resolves after the second.
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn double_tap(&self, x: f64, y: f64) -> AsyncTask<Blocking<()>> {
+    let core = self.core.clone();
+    blocking(move || {
+      core.double_tap(x, y);
+      Ok(())
+    })
   }
 
-  /// Press at (x, y), hold for `ms`, then lift — iOS's long press.
-  #[napi]
-  pub fn long_press(&self, x: f64, y: f64, ms: Option<f64>) {
-    let hold = std::time::Duration::from_secs_f64((ms.unwrap_or(800.0) / 1000.0).max(0.0));
-    self.core.long_press(x, y, hold);
+  /// Press at (x, y), hold for `hold_ms` (default 800), then lift — iOS's long press.
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn long_press(&self, x: f64, y: f64, hold_ms: Option<f64>) -> AsyncTask<Blocking<()>> {
+    let core = self.core.clone();
+    blocking(move || {
+      core.long_press(x, y, ms(hold_ms.unwrap_or(800.0)));
+      Ok(())
+    })
   }
 
-  /// Drag between two points, each 0..1 in the box: down, hold `hold_ms` (default 300),
-  /// move over `move_ms` (default 600), lift.
-  #[napi]
+  /// Drag between two points, each 0..1 in the box: down, hold `hold_ms` (default 800),
+  /// move over `move_ms` (default 500), hold `destination_hold_ms` (default 0), lift.
+  #[napi(ts_return_type = "Promise<void>")]
   pub fn drag(
     &self,
     x1: f64,
@@ -603,13 +641,17 @@ impl Driver {
     hold_ms: Option<f64>,
     move_ms: Option<f64>,
     destination_hold_ms: Option<f64>,
-  ) {
-    let s = |ms: f64| std::time::Duration::from_secs_f64((ms / 1000.0).max(0.0));
-    self.core.drag_with_holds((x1, y1), (x2, y2), sd::DragTiming {
-      source_hold: s(hold_ms.unwrap_or(800.0)),
-      movement: s(move_ms.unwrap_or(500.0)),
-      destination_hold: s(destination_hold_ms.unwrap_or(0.0)),
-    });
+  ) -> AsyncTask<Blocking<()>> {
+    let core = self.core.clone();
+    let timing = sd::DragTiming {
+      source_hold: ms(hold_ms.unwrap_or(800.0)),
+      movement: ms(move_ms.unwrap_or(500.0)),
+      destination_hold: ms(destination_hold_ms.unwrap_or(0.0)),
+    };
+    blocking(move || {
+      core.drag_with_holds((x1, y1), (x2, y2), timing);
+      Ok(())
+    })
   }
 
   #[napi(ts_return_type = "Promise<string>")]
@@ -640,98 +682,112 @@ impl Driver {
     self.core.key_combo(&keys)
   }
 
-  #[napi]
-  pub fn clipboard_read(&self) -> Result<String> {
-    self.core.clipboard_read().map_err(|e| Error::from_reason(e.to_string()))
+  #[napi(ts_return_type = "Promise<string>")]
+  pub fn clipboard_read(&self) -> AsyncTask<Blocking<String>> {
+    let core = self.core.clone();
+    blocking(move || core.clipboard_read())
   }
 
-  #[napi]
-  pub fn clipboard_write(&self, text: String) -> Result<()> {
-    self.core.clipboard_write(&text).map_err(|e| Error::from_reason(e.to_string()))
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn clipboard_write(&self, text: String) -> AsyncTask<Blocking<()>> {
+    let core = self.core.clone();
+    blocking(move || core.clipboard_write(&text))
   }
 
-  #[napi]
-  pub fn open_url(&self, url: String) -> Result<()> {
-    self.core.open_url(&url).map_err(|e| Error::from_reason(e.to_string()))
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn open_url(&self, url: String) -> AsyncTask<Blocking<()>> {
+    let core = self.core.clone();
+    blocking(move || core.open_url(&url))
   }
 
-  #[napi]
-  pub fn launch(&self, bundle_id: String) -> Result<()> {
-    self.core.launch(&bundle_id).map_err(|e| Error::from_reason(e.to_string()))
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn launch(&self, bundle_id: String) -> AsyncTask<Blocking<()>> {
+    let core = self.core.clone();
+    blocking(move || core.launch(&bundle_id))
   }
 
-  #[napi]
-  pub fn terminate(&self, bundle_id: String) -> Result<()> {
-    self.core.terminate(&bundle_id).map_err(|e| Error::from_reason(e.to_string()))
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn terminate(&self, bundle_id: String) -> AsyncTask<Blocking<()>> {
+    let core = self.core.clone();
+    blocking(move || core.terminate(&bundle_id))
   }
 
-  #[napi]
-  pub fn set_location(&self, lat: f64, lon: f64) -> Result<()> {
-    self.core.set_location(lat, lon).map_err(|e| Error::from_reason(e.to_string()))
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn set_location(&self, lat: f64, lon: f64) -> AsyncTask<Blocking<()>> {
+    let core = self.core.clone();
+    blocking(move || core.set_location(lat, lon))
   }
 
-  #[napi]
-  pub fn set_appearance(&self, appearance: String) -> Result<()> {
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn set_appearance(&self, appearance: String) -> Result<AsyncTask<Blocking<()>>> {
     let appearance = match appearance.to_ascii_lowercase().as_str() {
       "light" => sd::Appearance::Light,
       "dark" => sd::Appearance::Dark,
       _ => return Err(Error::from_reason("appearance must be light or dark")),
     };
-    self.core.set_appearance(appearance).map_err(|e| Error::from_reason(e.to_string()))
+    let core = self.core.clone();
+    Ok(blocking(move || core.set_appearance(appearance)))
   }
 
-  #[napi]
-  pub fn grant_permission(&self, service: String, bundle_id: String) -> Result<()> {
-    self.core.grant_permission(&service, &bundle_id).map_err(|e| Error::from_reason(e.to_string()))
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn grant_permission(&self, service: String, bundle_id: String) -> AsyncTask<Blocking<()>> {
+    let core = self.core.clone();
+    blocking(move || core.grant_permission(&service, &bundle_id))
   }
 
-  #[napi]
-  pub fn revoke_permission(&self, service: String, bundle_id: String) -> Result<()> {
-    self.core.revoke_permission(&service, &bundle_id).map_err(|e| Error::from_reason(e.to_string()))
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn revoke_permission(&self, service: String, bundle_id: String) -> AsyncTask<Blocking<()>> {
+    let core = self.core.clone();
+    blocking(move || core.revoke_permission(&service, &bundle_id))
   }
 
-  #[napi]
-  pub fn reset_permission(&self, service: String, bundle_id: String) -> Result<()> {
-    self.core.reset_permission(&service, &bundle_id).map_err(|e| Error::from_reason(e.to_string()))
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn reset_permission(&self, service: String, bundle_id: String) -> AsyncTask<Blocking<()>> {
+    let core = self.core.clone();
+    blocking(move || core.reset_permission(&service, &bundle_id))
   }
 
-  #[napi]
-  pub fn set_content_size(&self, size: String) -> Result<()> {
-    self.core.set_content_size(&size).map_err(|e| Error::from_reason(e.to_string()))
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn set_content_size(&self, size: String) -> AsyncTask<Blocking<()>> {
+    let core = self.core.clone();
+    blocking(move || core.set_content_size(&size))
   }
 
-  #[napi]
-  pub fn status_bar_override(&self) -> Result<()> {
-    self.core.status_bar_override().map_err(|e| Error::from_reason(e.to_string()))
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn status_bar_override(&self) -> AsyncTask<Blocking<()>> {
+    let core = self.core.clone();
+    blocking(move || core.status_bar_override())
   }
 
-  #[napi]
-  pub fn status_bar_clear(&self) -> Result<()> {
-    self.core.status_bar_clear().map_err(|e| Error::from_reason(e.to_string()))
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn status_bar_clear(&self) -> AsyncTask<Blocking<()>> {
+    let core = self.core.clone();
+    blocking(move || core.status_bar_clear())
   }
 
-  #[napi]
-  pub fn push_notification(&self, bundle_id: String, payload_path: String) -> Result<()> {
-    self.core.push_notification(&bundle_id, &payload_path).map_err(|e| Error::from_reason(e.to_string()))
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn push_notification(&self, bundle_id: String, payload_path: String) -> AsyncTask<Blocking<()>> {
+    let core = self.core.clone();
+    blocking(move || core.push_notification(&bundle_id, &payload_path))
   }
 
-  #[napi]
-  pub fn reset_keychain(&self) -> Result<()> {
-    self.core.reset_keychain().map_err(|e| Error::from_reason(e.to_string()))
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn reset_keychain(&self) -> AsyncTask<Blocking<()>> {
+    let core = self.core.clone();
+    blocking(move || core.reset_keychain())
   }
 
-  #[napi]
-  pub fn apps(&self) -> Result<Vec<App>> {
-    self.core.apps().map_err(to_napi).map(|apps| apps.into_iter().map(|app| App {
-      bundle_id: app.bundle_id,
-      name: app.name,
-      app_type: app.app_type,
-    }).collect())
+  #[napi(ts_return_type = "Promise<Array<App>>")]
+  pub fn apps(&self) -> AsyncTask<Blocking<Vec<App>>> {
+    let core = self.core.clone();
+    blocking(move || core.apps().map(|apps| apps.into_iter().map(to_app).collect()))
   }
 
-  #[napi]
-  pub fn clear_app_data(&self, bundle_id: String) -> Result<()> {
-    self.core.clear_app_data(&bundle_id).map_err(to_napi)
+  /// Terminates the app and deletes its data container's contents. Destructive.
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn clear_app_data(&self, bundle_id: String) -> AsyncTask<Blocking<()>> {
+    let core = self.core.clone();
+    blocking(move || core.clear_app_data(&bundle_id))
   }
 
   #[napi]

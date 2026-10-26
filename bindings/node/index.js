@@ -146,7 +146,7 @@ class Driver {
   }
 
   doubleTap(x, y) {
-    this.#n.doubleTap(x, y);
+    return this.#n.doubleTap(x, y);
   }
 
   /** The agent layer for this driver (one per driver: refs carry across calls). */
@@ -175,11 +175,19 @@ class Driver {
   }
 
   longPress(x, y, ms) {
-    this.#n.longPress(x, y, ms);
+    return this.#n.longPress(x, y, ms ?? undefined);
   }
 
   drag(x1, y1, x2, y2, opts) {
-    this.#n.drag(x1, y1, x2, y2, opts?.holdMs, opts?.moveMs, opts?.destinationHoldMs);
+    return this.#n.drag(
+      x1,
+      y1,
+      x2,
+      y2,
+      opts?.holdMs ?? undefined,
+      opts?.moveMs ?? undefined,
+      opts?.destinationHoldMs ?? undefined,
+    );
   }
 
   key(name) {

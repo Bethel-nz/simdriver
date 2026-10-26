@@ -90,7 +90,7 @@ describe('simdriver', () => {
     clearInterval(timer);
     expect(ticks).toBeGreaterThan(0);
     expect(driver.udid).toBe(udid);
-    expect(driver.apps().some((app) => app.bundleId === 'com.apple.mobilesafari')).toBeTruthy();
+    expect((await driver.apps()).some((app) => app.bundleId === 'com.apple.mobilesafari')).toBeTruthy();
 
     const deadline = Date.now() + 10_000;
     while (events.filter((e) => e.type === 'frame').length < 100 && Date.now() < deadline) {
