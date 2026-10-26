@@ -79,3 +79,28 @@ fn it_agent_drives_settings() {
     eprintln!("home:\n{}", home.text);
     assert!(home.elements.iter().any(|e| e.label.as_deref() == Some("Settings")));
 }
+
+#[test]
+fn it_long_press_shows_the_home_screen_context_menu() {
+    let Some(udid) = udid() else { return };
+    let opts = Options { device: DeviceSelector::Udid(udid.clone()), ..Options::default() };
+    let d = Driver::start(opts, |_| {}).expect("start");
+    let t0 = Instant::now();
+    while d.state() != State::Live {
+        assert!(t0.elapsed() < Duration::from_secs(40), "never live");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let agent = Agent::new(d);
+
+    agent.steps(&[Step::Press { button: "home".into() }]).ok.then_some(()).unwrap();
+    agent.steps(&[Step::WaitFor { text: "Settings".into(), timeout_ms: Some(10_000) }]).ok.then_some(()).unwrap();
+    // Long-press the Settings icon: iOS offers its home-screen context menu.
+    let r = agent.steps(&[
+        Step::LongPress { target: "Settings".into(), ms: Some(900) },
+        Step::WaitFor { text: "Edit Home Screen".into(), timeout_ms: Some(10_000) },
+    ]);
+    assert!(r.ok, "{:?}\n{}", r.failed, r.snapshot.map(|s| s.text).unwrap_or_default());
+
+    // Leave edit mode (the icons wiggle) before the next test finds the screen.
+    agent.steps(&[Step::Press { button: "home".into() }]).ok.then_some(()).unwrap();
+}

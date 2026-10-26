@@ -18,6 +18,7 @@ use std::ffi::{CStr, CString};
 use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::os::raw::{c_char, c_void};
+use std::time::Duration;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
@@ -269,6 +270,17 @@ pub unsafe extern "C" fn sd_tap(d: *mut sd_driver, x: f64, y: f64) {
     if d.is_null() { return; }
     let d = unsafe { &*d };
     let _ = guarded(AssertUnwindSafe(|| d.driver.tap(x, y)));
+}
+
+/// Press at (x, y), hold for `hold_secs`, then lift — iOS's long press (context menus).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_long_press(d: *mut sd_driver, x: f64, y: f64, hold_secs: f64) {
+    clear_error();
+    if d.is_null() { return; }
+    let d = unsafe { &*d };
+    let _ = guarded(AssertUnwindSafe(|| {
+        d.driver.long_press(x, y, Duration::from_secs_f64(hold_secs.max(0.0)));
+    }));
 }
 
 /// The frontmost app's accessibility tree as JSON (one node: `role`, `label`?, `value`?,

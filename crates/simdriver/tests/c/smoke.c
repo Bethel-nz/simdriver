@@ -43,6 +43,7 @@ int main(void) {
     }
     sd_text(NULL, "hi");
     sd_tap(NULL, 0.5, 0.5);
+    sd_long_press(NULL, 0.5, 0.5, 0.8f);
     if (sd_accessibility_json(NULL) != NULL) {
         fprintf(stderr, "sd_accessibility_json(NULL) must return NULL\n");
         return 1;

@@ -168,6 +168,10 @@ class Driver {
     return this.#n.screenPoints() ?? null;
   }
 
+  longPress(x, y, ms) {
+    this.#n.longPress(x, y, ms);
+  }
+
   key(name) {
     return this.#n.key(name);
   }

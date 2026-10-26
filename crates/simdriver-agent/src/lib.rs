@@ -63,6 +63,8 @@ pub trait Device: Send + Sync {
     fn capture(&self, wait: Duration) -> Option<Frame>;
     /// A tap at (x, y) in 0..1 of the screen.
     fn tap(&self, x: f64, y: f64);
+    /// Press at (x, y) in 0..1 of the screen, hold for `hold`, then lift.
+    fn long_press(&self, x: f64, y: f64, hold: Duration);
     /// One finger from `from` to `to` (0..1 of the screen) over `duration`.
     fn swipe(&self, from: (f64, f64), to: (f64, f64), duration: Duration);
     fn text(&self, s: &str);
@@ -82,6 +84,9 @@ impl Device for Driver {
     }
     fn tap(&self, x: f64, y: f64) {
         Driver::tap(self, x, y)
+    }
+    fn long_press(&self, x: f64, y: f64, hold: Duration) {
+        Driver::long_press(self, x, y, hold)
     }
     fn swipe(&self, from: (f64, f64), to: (f64, f64), duration: Duration) {
         let none = simdriver::Modifiers::default();
@@ -118,6 +123,9 @@ impl<D: Device + ?Sized> Device for Arc<D> {
     }
     fn tap(&self, x: f64, y: f64) {
         (**self).tap(x, y)
+    }
+    fn long_press(&self, x: f64, y: f64, hold: Duration) {
+        (**self).long_press(x, y, hold)
     }
     fn swipe(&self, from: (f64, f64), to: (f64, f64), duration: Duration) {
         (**self).swipe(from, to, duration)
@@ -495,22 +503,19 @@ impl<D: Device> Agent<D> {
     pub fn tap(&self, target: &str, expect: Option<&str>) -> Result<Tapped, AgentError> {
         let screen = self.screen()?;
         if is_ref(target) {
-            return self.tap_ref(&target.to_ascii_lowercase(), expect, screen);
+            return self.tap_ref(&target.to_ascii_lowercase(), expect, screen, None);
         }
         let cols = lock(&self.last).as_ref().map_or(Grid::DEFAULT_COLS, |s| s.grid.cols);
-        match Grid::new(screen, cols).center(target) {
-            Some((x, y)) => {
-                self.mark(None, screen, false);
-                self.device.tap(x, y);
-                Ok(Tapped { target: target.to_string(), name: String::new(), at: [x * screen.0, y * screen.1] })
-            }
-            None => Err(AgentError::NotFound(format!(
-                "{target:?} is neither an element ref (e4) nor a grid cell (C4)"
-            ))),
-        }
+        self.tap_cell(target, screen, None, cols)
     }
 
-    fn tap_ref(&self, target: &str, expect: Option<&str>, screen: (f64, f64)) -> Result<Tapped, AgentError> {
+    fn tap_ref(
+        &self,
+        target: &str,
+        expect: Option<&str>,
+        screen: (f64, f64),
+        hold: Option<Duration>,
+    ) -> Result<Tapped, AgentError> {
         let last = lock(&self.last)
             .clone()
             .ok_or_else(|| AgentError::NotReady("no snapshot yet: take one, then use its refs".into()))?;
@@ -549,28 +554,58 @@ impl<D: Device> Agent<D> {
             )));
         }
         let now = now.clone();
-        self.touch(target, &now, root, screen)
+        self.touch(target, &now, root, screen, hold)
     }
 
-    fn touch(&self, target: &str, el: &Element, root: AxNode, screen: (f64, f64)) -> Result<Tapped, AgentError> {
+    /// Touch the element: a tap, or with `hold` a long press (iOS context menus).
+    fn touch(
+        &self,
+        target: &str,
+        el: &Element,
+        root: AxNode,
+        screen: (f64, f64),
+        hold: Option<Duration>,
+    ) -> Result<Tapped, AgentError> {
         let p = el.tap.ok_or_else(|| {
             AgentError::Covered(format!("{target} {:?} is covered by another element", el.name()))
         })?;
         self.mark(Some(root), screen, false);
-        self.device.tap(p[0] / screen.0, p[1] / screen.1);
+        let at = (p[0] / screen.0, p[1] / screen.1);
+        match hold {
+            Some(h) => self.device.long_press(at.0, at.1, h),
+            None => self.device.tap(at.0, at.1),
+        }
         Ok(Tapped { target: target.to_string(), name: el.name().to_string(), at: p })
     }
 
-    /// Tap a ref, a label on the current (settled) screen, or a grid cell.
-    fn act_on(&self, target: &str, text_input: bool) -> Result<Tapped, AgentError> {
+    /// Touch a grid cell's centre: a tap, or with `hold` a long press.
+    fn tap_cell(&self, target: &str, screen: (f64, f64), hold: Option<Duration>, cols: u32) -> Result<Tapped, AgentError> {
+        let (x, y) = Grid::new(screen, cols).center(target).ok_or_else(|| {
+            AgentError::NotFound(format!("{target:?} is neither an element ref (e4) nor a grid cell (C4)"))
+        })?;
+        self.mark(None, screen, false);
+        match hold {
+            Some(h) => self.device.long_press(x, y, h),
+            None => self.device.tap(x, y),
+        }
+        Ok(Tapped { target: target.to_string(), name: String::new(), at: [x * screen.0, y * screen.1] })
+    }
+
+    /// Touch a ref, a label on the current (settled) screen, or a grid cell: a tap, or
+    /// with `hold` a long press.
+    fn act_on(&self, target: &str, text_input: bool, hold: Option<Duration>) -> Result<Tapped, AgentError> {
         if is_ref(target) {
-            return self.tap(target, None);
+            let screen = self.screen()?;
+            return self.tap_ref(&target.to_ascii_lowercase(), None, screen, hold);
         }
         let screen = self.screen()?;
         let (root, els, _, _) = self.settled(screen, SnapshotOptions::default().settle)?;
         match self.find(&els, target, text_input) {
-            Some(el) => self.touch(target, &el.clone(), root, screen),
-            None if Grid::new(screen, Grid::DEFAULT_COLS).center(target).is_some() => self.tap(target, None),
+            Some(el) => self.touch(target, &el.clone(), root, screen, hold),
+            None if Grid::new(screen, Grid::DEFAULT_COLS).center(target).is_some() => {
+                let cols = lock(&self.last).as_ref().map_or(Grid::DEFAULT_COLS, |s| s.grid.cols);
+                self.tap_cell(target, screen, hold, cols)
+            }
             None => Err(AgentError::NotFound(format!("nothing on screen is called {target:?}"))),
         }
     }
@@ -591,9 +626,9 @@ impl<D: Device> Agent<D> {
 
     fn run(&self, step: &Step) -> Result<(), AgentError> {
         match step {
-            Step::Tap { target } => self.act_on(target, false).map(drop),
+            Step::Tap { target } => self.act_on(target, false, None).map(drop),
             Step::Fill { target, value } => {
-                self.act_on(target, true)?;
+                self.act_on(target, true, None)?;
                 thread::sleep(FOCUS_WAIT);
                 self.device.text(value);
                 Ok(())
@@ -631,6 +666,10 @@ impl<D: Device> Agent<D> {
                 let n = |x: f64, y: f64| (x / screen.0, y / screen.1);
                 self.device.swipe(n(x0, y0), n(x1, y1), SCROLL_TIME);
                 Ok(())
+            }
+            Step::LongPress { target, ms } => {
+                let hold = Duration::from_millis(ms.unwrap_or(800));
+                self.act_on(target, false, Some(hold)).map(drop)
             }
             Step::Type { value } => {
                 self.mark(None, self.screen()?, false);
@@ -766,6 +805,7 @@ mod tests {
     struct Fake {
         screen: Mutex<AxNode>,
         taps: Mutex<Vec<(f64, f64)>>,
+        long_presses: Mutex<Vec<(f64, f64, Duration)>>,
         typed: Mutex<Vec<String>>,
         swipes: Mutex<Vec<Swipe>>,
         reads: AtomicU64,
@@ -779,6 +819,7 @@ mod tests {
             Fake {
                 screen: Mutex::new(screen),
                 taps: Mutex::default(),
+                long_presses: Mutex::default(),
                 typed: Mutex::default(),
                 swipes: Mutex::default(),
                 reads: AtomicU64::new(0),
@@ -808,6 +849,9 @@ mod tests {
             if let Some(f) = lock(&self.on_tap).as_ref() {
                 f(self, x, y);
             }
+        }
+        fn long_press(&self, x: f64, y: f64, hold: Duration) {
+            lock(&self.long_presses).push((x, y, hold));
         }
         fn swipe(&self, from: (f64, f64), to: (f64, f64), _: Duration) {
             lock(&self.swipes).push((from, to));
@@ -1112,6 +1156,32 @@ mod tests {
         assert_eq!(swipes[1], ((110.0 / 400.0, 265.0 / 800.0), (290.0 / 400.0, 265.0 / 800.0)));
         let r = a.steps(&[Step::Scroll { direction: "sideways".into(), target: None }]);
         assert!(r.failed.unwrap().error.starts_with("invalid: unknown direction"));
+    }
+
+    #[test]
+    fn long_press_holds_the_resolved_target() {
+        let a = Agent::new(Fake::new(settings()));
+        a.snapshot(&quick()).unwrap();
+        let r = a.steps(&serde_json::from_str::<Vec<Step>>(
+            r#"[{"action":"longPress","target":"General"},
+                {"action":"longPress","target":"Search","ms":300},
+                {"action":"longPress","target":"C4","ms":1500}]"#,
+        )
+        .unwrap());
+        assert!(r.ok, "{:?}", r.failed);
+        let held = lock(&a.device.long_presses).clone();
+        assert_eq!(
+            held,
+            [
+                (0.5, 225.0 / 800.0, Duration::from_millis(800)),
+                (0.5, 762.5 / 800.0, Duration::from_millis(300)),
+                (400.0 * 3.5 / 6.0 / 400.0, 800.0 * 2.5 / 12.0 / 800.0, Duration::from_millis(1500))
+            ]
+        );
+        assert!(lock(&a.device.taps).is_empty(), "long presses never tap");
+        // Covered and unknown targets refuse without touching.
+        let r = a.steps(&[Step::LongPress { target: "e3".into(), ms: Some(10) }]);
+        assert_eq!(r.failed.unwrap().error, "covered: e3 \"Passcode\" is covered by another element");
     }
 
     #[test]

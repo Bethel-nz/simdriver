@@ -796,6 +796,15 @@ impl Driver {
         self.pointer(Phase::Up, x, y, Modifiers::default());
     }
 
+    /// Press at (`x`, `y`), normalized 0..1 inside the box, hold for `hold`, then lift —
+    /// iOS's long press (context menus, rearrange mode). The hold sleeps on the calling
+    /// thread; the driver keeps serving input from other threads meanwhile.
+    pub fn long_press(&self, x: f64, y: f64, hold: Duration) {
+        self.pointer(Phase::Down, x, y, Modifiers::default());
+        thread::sleep(hold);
+        self.pointer(Phase::Up, x, y, Modifiers::default());
+    }
+
     /// The frontmost app's accessibility tree (system UI such as the home screen
     /// included), frames in screen points. Blocks: the first call starts the `sdax`
     /// helper and takes 1–2 s while the guest warms up; later calls take tens of ms.

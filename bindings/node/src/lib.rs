@@ -563,6 +563,12 @@ impl Driver {
     self.core.tap(x, y);
   }
 
+  /// Press at (x, y), hold for `ms`, then lift — iOS's long press.
+  pub fn long_press(&self, x: f64, y: f64, ms: Option<f64>) {
+    let hold = std::time::Duration::from_secs_f64((ms.unwrap_or(800.0) / 1000.0).max(0.0));
+    self.core.long_press(x, y, hold);
+  }
+
   #[napi(ts_return_type = "Promise<string>")]
   pub fn accessibility(&self) -> AsyncTask<AxTask> {
     AsyncTask::new(AxTask { core: self.core.clone() })
