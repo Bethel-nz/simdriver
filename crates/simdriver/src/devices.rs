@@ -262,7 +262,16 @@ pub fn clear_app_data(udid: &str, bundle_id: &str) -> Result<(), Error> {
     }
     let (terminated, _, terminate_err) =
         run_simctl(&["terminate", udid, bundle_id], Duration::from_secs(30))?;
-    if !terminated && !terminate_err.to_ascii_lowercase().contains("not running") {
+    // Not running is the usual case: nothing to terminate before erasing. simctl words it
+    // "found nothing to terminate" (ESRCH) and, on some versions, "app is not running".
+    if !terminated
+        && !terminate_err
+            .to_ascii_lowercase()
+            .contains("not running")
+        && !terminate_err
+            .to_ascii_lowercase()
+            .contains("found nothing to terminate")
+    {
         return Err(Error::Simctl(format!(
             "could not terminate app before clearing data: {}",
             terminate_err.trim()
