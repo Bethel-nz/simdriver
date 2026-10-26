@@ -22,7 +22,10 @@ const EDGE_ZONE_BOTTOM_PT: f64 = 24.0;
 const EDGE_ZONE_TOP_PT: f64 = 16.0;
 const EDGE_ZONE_LEFT_PT: f64 = 10.0;
 const EDGE_ZONE_RIGHT_PT: f64 = 10.0;
-const COMMIT_PT: f64 = 16.0;
+// Travel that decides a held edge touch. Small, because the screen doesn't follow the
+// finger until then (16 pt felt like lag-then-jump on a home swipe); still enough to
+// tell a tap or a sideways swipe from an inward one.
+const COMMIT_PT: f64 = 6.0;
 const PINCH_PT_PER_E: f64 = 150.0;
 const PINCH_SCALE: (f64, f64) = (0.25, 4.0);
 const PINCH_R0_PT: f64 = 50.0;
@@ -345,13 +348,13 @@ mod tests {
     fn bottom_edge_inward_replays_from_edge() {
         let mut r = r();
         assert!(r.down(200.0, 860.0, false, false, T0).is_empty());
-        assert!(r.move_to(200.0, 850.0, T0).is_empty());
+        assert!(r.move_to(200.0, 856.0, T0).is_empty(), "4 pt up is still held");
         assert_eq!(
-            r.move_to(200.0, 840.0, T0),
+            r.move_to(200.0, 850.0, T0),
             vec![
                 t(Phase::Down, 200.0, 873.0, Edge::Bottom),
+                t(Phase::Move, 200.0, 856.0, Edge::Bottom),
                 t(Phase::Move, 200.0, 850.0, Edge::Bottom),
-                t(Phase::Move, 200.0, 840.0, Edge::Bottom),
             ]
         );
         assert_eq!(r.move_to(200.0, 700.0, T0), vec![t(Phase::Move, 200.0, 700.0, Edge::Bottom)]);
