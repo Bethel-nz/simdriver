@@ -81,6 +81,9 @@ describe('simdriver', () => {
     expect(states).toContain('starting');
     expect(states).toContain('live');
 
+    const pts = driver.screenPoints();
+    expect(pts !== null && pts.width > 0 && pts.height > pts.width).toBe(true);
+
     const stats = driver.stats();
     expect(stats.frames).toBeGreaterThanOrEqual(100);
     expect(stats.fps).toBeGreaterThan(0);

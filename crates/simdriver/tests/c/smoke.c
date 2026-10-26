@@ -31,6 +31,12 @@ int main(void) {
     }
     sd_pointer(NULL, 0, 0.5, 0.5, 0);
     sd_scroll(NULL, 1, 0.5, 0.5, 0.0, -0.1);
+    sd_touch2(NULL, 0, 0.25, 0.5, 0.75, 0.5);
+    double sw = -1, sh = -1;
+    if (sd_screen_points(NULL, &sw, &sh) || sw != -1 || sh != -1) {
+        fprintf(stderr, "sd_screen_points(NULL) must return false and write nothing\n");
+        return 1;
+    }
     if (sd_key(NULL, "enter")) {
         fprintf(stderr, "sd_key(NULL) must return false\n");
         return 1;

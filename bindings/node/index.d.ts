@@ -59,6 +59,10 @@ export interface Driver {
     dx: number,
     dy: number,
   ): void;
+  /** Two fingers placed exactly (rotation, off-centre pinch), each 0..1 in the box. */
+  touch2(phase: 'down' | 'move' | 'up', x1: number, y1: number, x2: number, y2: number): void;
+  /** The device screen in points (e.g. 402×874), once input is connected; else null. */
+  screenPoints(): { width: number; height: number } | null;
   key(name: string): boolean;
   text(s: string): void;
   button(

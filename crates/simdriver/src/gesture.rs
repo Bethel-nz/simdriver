@@ -74,6 +74,8 @@ pub(crate) struct Router {
     h: f64,
     touch: Option<Touch>,
     pan: Option<Pan>,
+    /// Host-driven two-finger contact (`two_finger`): where its fingers last were.
+    two: Option<[f64; 4]>,
 }
 
 fn clamp(v: f64, lo: f64, hi: f64) -> f64 {
@@ -97,7 +99,7 @@ fn touch(phase: Phase, x: f64, y: f64, edge: Edge) -> HidCmd {
 
 impl Router {
     pub(crate) fn new(screen_pt: (f64, f64)) -> Router {
-        Router { w: screen_pt.0, h: screen_pt.1, touch: None, pan: None }
+        Router { w: screen_pt.0, h: screen_pt.1, touch: None, pan: None, two: None }
     }
 
     pub(crate) fn set_screen(&mut self, screen_pt: (f64, f64)) {
@@ -164,6 +166,46 @@ impl Router {
         }
     }
 
+    fn lift_two(&mut self, out: &mut Vec<HidCmd>) {
+        if let Some(f) = self.two.take() {
+            out.push(Self::touch2(Phase::Up, f));
+        }
+    }
+
+    /// Two fingers exactly where the host puts them (rotation, off-centre pinch,
+    /// scripted multi-touch). A down first lifts whatever else is touching; moves and
+    /// ups without a down are ignored. Points are clamped to the screen.
+    pub(crate) fn two_finger(&mut self, phase: Phase, f: [f64; 4]) -> Vec<HidCmd> {
+        let f = [self.cx(f[0]), self.cy(f[1]), self.cx(f[2]), self.cy(f[3])];
+        let mut out = Vec::new();
+        match phase {
+            Phase::Down => {
+                self.lift_pan(&mut out);
+                self.lift_two(&mut out);
+                if let Some(t) = &self.touch {
+                    if t.state == State::Pending {
+                        self.touch = None; // never reached the device
+                    } else {
+                        let (lx, ly) = t.last;
+                        out.extend(self.up(lx, ly, Duration::ZERO));
+                    }
+                }
+                self.two = Some(f);
+                out.push(Self::touch2(Phase::Down, f));
+            }
+            Phase::Move if self.two.is_some() => {
+                self.two = Some(f);
+                out.push(Self::touch2(Phase::Move, f));
+            }
+            Phase::Up if self.two.is_some() => {
+                self.two = None;
+                out.push(Self::touch2(Phase::Up, f));
+            }
+            _ => {}
+        }
+        out
+    }
+
     fn lift_pan(&mut self, out: &mut Vec<HidCmd>) {
         if let Some(p) = self.pan.take() {
             out.push(touch(Phase::Up, p.x, p.y, Edge::None));
@@ -175,6 +217,7 @@ impl Router {
     pub(crate) fn down(&mut self, x: f64, y: f64, pinch: bool, pan: bool, now: Duration) -> Vec<HidCmd> {
         let mut out = Vec::new();
         self.lift_pan(&mut out); // a click ends any trackpad pan in flight
+        self.lift_two(&mut out);
         // A down without an up (the host lost one): lift the finger first. A held edge
         // touch never reached the device, so it is simply dropped.
         if let Some(t) = &self.touch {
@@ -283,8 +326,8 @@ impl Router {
         now: Duration,
     ) -> Vec<HidCmd> {
         let mut out = Vec::new();
-        if self.touch.is_some() {
-            return out; // a mouse drag owns the finger
+        if self.touch.is_some() || self.two.is_some() {
+            return out; // a mouse drag or a two-finger contact owns the fingers
         }
         match phase {
             ScrollPhase::Began => {
@@ -493,6 +536,31 @@ mod tests {
         r.up(100.0, 100.0, T0);
         assert!(r.down(200.0, 860.0, false, false, T0).is_empty());
         assert_eq!(r.down(100.0, 100.0, false, false, T0), vec![t(Phase::Down, 100.0, 100.0, Edge::None)]);
+    }
+
+    #[test]
+    fn touch2_places_both_fingers_and_owns_the_screen() {
+        let mut r = r();
+        // Moves and ups without a down do nothing.
+        assert!(r.two_finger(Phase::Move, [1.0, 2.0, 3.0, 4.0]).is_empty());
+        assert!(r.two_finger(Phase::Up, [1.0, 2.0, 3.0, 4.0]).is_empty());
+        // A down lifts a one-finger touch in flight; points clamp to the screen.
+        r.down(200.0, 400.0, false, false, T0);
+        assert_eq!(
+            r.two_finger(Phase::Down, [100.0, 400.0, 500.0, 400.0]),
+            vec![t(Phase::Up, 200.0, 400.0, Edge::None), t2(Phase::Down, 100.0, 400.0, 402.0, 400.0)]
+        );
+        // Rotation: each finger goes exactly where it is put.
+        assert_eq!(r.two_finger(Phase::Move, [150.0, 350.0, 250.0, 450.0]), vec![t2(Phase::Move, 150.0, 350.0, 250.0, 450.0)]);
+        // Scroll can't start a pan while two fingers are down.
+        assert!(r.scroll(100.0, 100.0, 0.0, 0.0, ScrollPhase::Began, T0).is_empty());
+        assert_eq!(r.two_finger(Phase::Up, [160.0, 340.0, 240.0, 460.0]), vec![t2(Phase::Up, 160.0, 340.0, 240.0, 460.0)]);
+        // A mouse down lifts a two-finger contact left down.
+        r.two_finger(Phase::Down, [100.0, 100.0, 200.0, 200.0]);
+        assert_eq!(
+            r.down(50.0, 400.0, false, false, T0),
+            vec![t2(Phase::Up, 100.0, 100.0, 200.0, 200.0), t(Phase::Down, 50.0, 400.0, Edge::None)]
+        );
     }
 
     #[test]

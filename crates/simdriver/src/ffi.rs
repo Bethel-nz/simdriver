@@ -247,6 +247,36 @@ pub unsafe extern "C" fn sd_scroll(
     }));
 }
 
+/// Two fingers at (x1, y1) and (x2, y2), each 0..1 in the box; `phase_code` as for
+/// `sd_pointer`. For rotation and off-centre pinches.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_touch2(d: *mut sd_driver, phase_code: i32, x1: f64, y1: f64, x2: f64, y2: f64) {
+    clear_error();
+    if d.is_null() { return; }
+    let d = unsafe { &*d };
+    let _ = guarded(AssertUnwindSafe(|| {
+        if let Some(p) = phase(phase_code) {
+            d.driver.touch2(p, x1, y1, x2, y2);
+        }
+    }));
+}
+
+/// The device screen in points, written to `*w` and `*h`. Returns false (and writes
+/// nothing) until input is connected, or if `d`, `w` or `h` is NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sd_screen_points(d: *mut sd_driver, w: *mut f64, h: *mut f64) -> bool {
+    clear_error();
+    if d.is_null() || w.is_null() || h.is_null() { return false; }
+    let d = unsafe { &*d };
+    match catch_unwind(AssertUnwindSafe(|| d.driver.screen_points())) {
+        Ok(Some((sw, sh))) => {
+            unsafe { *w = sw; *h = sh; }
+            true
+        }
+        _ => false,
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sd_key(d: *mut sd_driver, name: *const c_char) -> bool {
     clear_error();

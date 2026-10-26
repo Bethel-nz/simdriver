@@ -40,6 +40,18 @@ void sd_pointer(struct sd_driver *d, int32_t phase_code, double x, double y, uin
 
 void sd_scroll(struct sd_driver *d, int32_t phase_code, double x, double y, double dx, double dy);
 
+/**
+ * Two fingers at (x1, y1) and (x2, y2), each 0..1 in the box; `phase_code` as for
+ * `sd_pointer`. For rotation and off-centre pinches.
+ */
+void sd_touch2(struct sd_driver *d, int32_t phase_code, double x1, double y1, double x2, double y2);
+
+/**
+ * The device screen in points, written to `*w` and `*h`. Returns false (and writes
+ * nothing) until input is connected, or if `d`, `w` or `h` is NULL.
+ */
+bool sd_screen_points(struct sd_driver *d, double *w, double *h);
+
 bool sd_key(struct sd_driver *d, const char *name);
 
 void sd_text(struct sd_driver *d, const char *s);

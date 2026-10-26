@@ -88,6 +88,14 @@ class Driver {
     this.#n.scroll(phase, x, y, dx, dy);
   }
 
+  touch2(phase, x1, y1, x2, y2) {
+    this.#n.touch2(phase, x1, y1, x2, y2);
+  }
+
+  screenPoints() {
+    return this.#n.screenPoints() ?? null;
+  }
+
   key(name) {
     return this.#n.key(name);
   }

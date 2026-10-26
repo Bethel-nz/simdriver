@@ -141,6 +141,7 @@ pub enum Event {
 enum Raw {
     Pointer { phase: Phase, x: f64, y: f64, pinch: bool, pan: bool },
     Scroll { phase: ScrollPhase, x: f64, y: f64, dx: f64, dy: f64 },
+    TwoFinger { phase: Phase, f: [f64; 4] },
     Cmd(HidCmd),
 }
 
@@ -148,7 +149,9 @@ impl Raw {
     fn is_move(&self) -> bool {
         matches!(
             self,
-            Raw::Pointer { phase: Phase::Move, .. } | Raw::Scroll { phase: ScrollPhase::Changed, .. }
+            Raw::Pointer { phase: Phase::Move, .. }
+                | Raw::Scroll { phase: ScrollPhase::Changed, .. }
+                | Raw::TwoFinger { phase: Phase::Move, .. }
         )
     }
 }
@@ -330,6 +333,7 @@ impl Inner {
                 }
             }
             Raw::Scroll { phase, x, y, dx, dy } => r.scroll(x * w, y * h, dx * w, dy * h, phase, now),
+            Raw::TwoFinger { phase, f } => r.two_finger(phase, [f[0] * w, f[1] * h, f[2] * w, f[3] * h]),
             Raw::Cmd(c) => vec![c],
         };
         for c in cmds {
@@ -745,6 +749,20 @@ impl Driver {
         self.inner.input(Raw::Scroll { phase, x, y, dx, dy });
     }
 
+    /// Two fingers at (`x1`, `y1`) and (`x2`, `y2`), normalized 0..1 inside the box,
+    /// placed exactly as given: rotation, an off-centre pinch, scripted multi-touch.
+    /// `Down` first lifts any other touch in progress; send `Move`s, then `Up`.
+    pub fn touch2(&self, phase: Phase, x1: f64, y1: f64, x2: f64, y2: f64) {
+        self.inner.input(Raw::TwoFinger { phase, f: [x1, y1, x2, y2] });
+    }
+
+    /// The device screen in points (e.g. 402×874 for an iPhone 18 Pro), known once
+    /// input is connected; `None` before that. Hosts use it to show the device at its
+    /// point-accurate size.
+    pub fn screen_points(&self) -> Option<(f64, f64)> {
+        lock(&self.inner.input).screen
+    }
+
     /// Press and release a named key (enter/return, escape, backspace, tab, space, delete,
     /// arrows; DOM spellings like "ArrowLeft" too; case-insensitive). False if unknown.
     pub fn key(&self, name: &str) -> bool {
@@ -1089,6 +1107,27 @@ mod tests {
         let d = r.expect("exit 1 is not fatal");
         log.wait_state(State::Restarting, 1);
         d.stop();
+    }
+
+    #[test]
+    fn touch2_and_screen_points() {
+        let rig = Rig::new("two", true);
+        let log = Log::default();
+        let d = rig.start("fake-two", &log).unwrap();
+        log.wait_state(State::Live, 1);
+        assert_eq!(d.screen_points(), Some((393.0, 852.0)));
+        d.touch2(Phase::Down, 0.25, 0.5, 0.75, 0.5);
+        d.touch2(Phase::Move, 0.5, 0.25, 0.5, 0.75); // a quarter turn
+        d.touch2(Phase::Up, 0.5, 0.25, 0.5, 0.75);
+        let t2 = |phase, x1, y1, x2, y2| HidCmd::Touch2 { phase, x1, y1, x2, y2 }.to_line();
+        assert_eq!(
+            rig.wait_hid_log(3),
+            vec![
+                t2(Phase::Down, 98.25, 426.0, 294.75, 426.0),
+                t2(Phase::Move, 196.5, 213.0, 196.5, 639.0),
+                t2(Phase::Up, 196.5, 213.0, 196.5, 639.0),
+            ]
+        );
     }
 
     #[test]

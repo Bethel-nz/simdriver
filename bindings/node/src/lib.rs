@@ -34,6 +34,12 @@ pub struct Device {
 }
 
 #[napi(object)]
+pub struct JsSize {
+  pub width: f64,
+  pub height: f64,
+}
+
+#[napi(object)]
 pub struct JsStats {
   pub fps: f64,
   pub active_fps: f64,
@@ -329,6 +335,18 @@ impl Driver {
     let p = scroll_phase(&phase_str)?;
     self.core.scroll(p, x, y, dx, dy);
     Ok(())
+  }
+
+  #[napi]
+  pub fn touch2(&self, phase_str: String, x1: f64, y1: f64, x2: f64, y2: f64) -> Result<()> {
+    let p = phase(&phase_str)?;
+    self.core.touch2(p, x1, y1, x2, y2);
+    Ok(())
+  }
+
+  #[napi]
+  pub fn screen_points(&self) -> Option<JsSize> {
+    self.core.screen_points().map(|(width, height)| JsSize { width, height })
   }
 
   #[napi]
