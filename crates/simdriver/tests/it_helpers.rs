@@ -3,7 +3,8 @@
 mod support;
 
 use simdriver::__internal::{
-    FrameMsg, FramePipeline, HidClient, HidCmd, HidEvent, ShmReader, Supervised, helper_dir, parse_frame_line,
+    FrameMsg, FramePipeline, HidClient, HidCmd, HidEvent, ShmReader, Supervised, helper_dir,
+    parse_frame_line,
 };
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
@@ -46,7 +47,13 @@ struct Spawned {
 /// sdframe (explicit --fps/--scale: its built-in defaults are 30/1) or sdhid on `udid`.
 fn spawn(name: &str, udid: &str) -> Spawned {
     let args: Vec<String> = match name {
-        "sdframe" => vec![udid.into(), "--fps".into(), "60".into(), "--scale".into(), "2".into()],
+        "sdframe" => vec![
+            udid.into(),
+            "--fps".into(),
+            "60".into(),
+            "--scale".into(),
+            "2".into(),
+        ],
         _ => vec![udid.into()],
     };
     let (ltx, lines) = mpsc::channel();
@@ -62,22 +69,30 @@ fn spawn(name: &str, udid: &str) -> Spawned {
         },
     )
     .unwrap_or_else(|e| panic!("spawn {name}: {e}"));
-    Spawned { helper, lines, exit }
+    Spawned {
+        helper,
+        lines,
+        exit,
+    }
 }
 
 /// Wait for the helper's first stdout line (sdframe: its `shm` line; sdhid: `ready`).
 fn first_line(name: &str, s: &Spawned) -> (String, Duration) {
     let t0 = Instant::now();
-    let l = s
-        .lines
-        .recv_timeout(UP_WAIT)
-        .unwrap_or_else(|_| panic!("{name} printed nothing within {UP_WAIT:?} (stderr: {:?})", s.helper.last_stderr()));
+    let l = s.lines.recv_timeout(UP_WAIT).unwrap_or_else(|_| {
+        panic!(
+            "{name} printed nothing within {UP_WAIT:?} (stderr: {:?})",
+            s.helper.last_stderr()
+        )
+    });
     (l, t0.elapsed())
 }
 
 #[test]
 fn helpers_exit_on_drop() {
-    let Some(udid) = support::booted_udid() else { return };
+    let Some(udid) = support::booted_udid() else {
+        return;
+    };
     for name in ["sdframe", "sdhid"] {
         let s = spawn(name, &udid);
         let (line, up) = first_line(name, &s);
@@ -89,18 +104,32 @@ fn helpers_exit_on_drop() {
         let t0 = Instant::now();
         drop(s.helper);
         let gone = time_until_gone(pid, Duration::from_secs(1));
-        eprintln!("{name}: up in {up:?} ({line}); drop returned in {:?}; gone after {gone:?}", t0.elapsed());
-        assert!(gone.is_some(), "{name} pid {pid} still alive 1 s after drop");
-        assert!(s.exit.recv_timeout(Duration::from_secs(1)).is_ok(), "{name}: on_exit did not fire");
+        eprintln!(
+            "{name}: up in {up:?} ({line}); drop returned in {:?}; gone after {gone:?}",
+            t0.elapsed()
+        );
+        assert!(
+            gone.is_some(),
+            "{name} pid {pid} still alive 1 s after drop"
+        );
+        assert!(
+            s.exit.recv_timeout(Duration::from_secs(1)).is_ok(),
+            "{name}: on_exit did not fire"
+        );
         if let Some((seg, slots, cap)) = shm {
-            assert!(ShmReader::open(&seg, slots, cap).is_err(), "{seg} still opens after sdframe stopped");
+            assert!(
+                ShmReader::open(&seg, slots, cap).is_err(),
+                "{seg} still opens after sdframe stopped"
+            );
         }
     }
 }
 
 #[test]
 fn helpers_exit_on_stdin_eof() {
-    let Some(udid) = support::booted_udid() else { return };
+    let Some(udid) = support::booted_udid() else {
+        return;
+    };
     // Both running at once, so neither can hold the other's stdin open via an inherited fd.
     let frame = spawn("sdframe", &udid);
     let hid = spawn("sdhid", &udid);
@@ -112,14 +141,19 @@ fn helpers_exit_on_stdin_eof() {
         let gone = time_until_gone(pid, Duration::from_secs(1));
         let code = s.exit.recv_timeout(Duration::from_secs(1));
         eprintln!("{name}: gone {gone:?} after stdin EOF, exit {code:?}");
-        assert!(gone.is_some(), "{name} pid {pid} still alive 1 s after stdin EOF");
+        assert!(
+            gone.is_some(),
+            "{name} pid {pid} still alive 1 s after stdin EOF"
+        );
         assert_eq!(code, Ok(Some(0)), "{name} must exit 0 on stdin EOF");
     }
 }
 
 #[test]
 fn it_frame_pipeline_delivers_frames() {
-    let Some(udid) = support::booted_udid() else { return };
+    let Some(udid) = support::booted_udid() else {
+        return;
+    };
     let _server = support::open_page(&udid, "anim.html");
     std::thread::sleep(Duration::from_secs(2)); // let Safari load and start animating
 
@@ -129,13 +163,25 @@ fn it_frame_pipeline_delivers_frames() {
     let pipeline = FramePipeline::new(
         move |f| {
             t2.lock().unwrap().push(Instant::now());
-            *d2.lock().unwrap() = Some((f.width, f.height, f.source_width, f.source_height, f.data.len()));
+            *d2.lock().unwrap() = Some((
+                f.width,
+                f.height,
+                f.source_width,
+                f.source_height,
+                f.data.len(),
+            ));
         },
         |_| {},
     );
     let helper = Supervised::spawn(
         helper_dir(None).join("sdframe"),
-        vec![udid.clone(), "--fps".into(), "60".into(), "--scale".into(), "2".into()],
+        vec![
+            udid.clone(),
+            "--fps".into(),
+            "60".into(),
+            "--scale".into(),
+            "2".into(),
+        ],
         pipeline.sink(),
         |_| {},
     )
@@ -143,7 +189,10 @@ fn it_frame_pipeline_delivers_frames() {
 
     let t0 = Instant::now();
     while times.lock().unwrap().is_empty() {
-        assert!(t0.elapsed() < UP_WAIT, "no frame through the pipeline within {UP_WAIT:?}");
+        assert!(
+            t0.elapsed() < UP_WAIT,
+            "no frame through the pipeline within {UP_WAIT:?}"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
     let first = t0.elapsed();
@@ -155,19 +204,31 @@ fn it_frame_pipeline_delivers_frames() {
     let stats = FrameStats::over_window(&times.lock().unwrap(), start, end);
     let (w, h, sw, sh, len) = dims.lock().unwrap().expect("dims");
     eprintln!("first frame after {first:?}; {w}x{h} (source {sw}x{sh}); {stats:?}");
-    assert!(w > 0 && h > 0 && len == (w * h * 4) as usize, "bad frame {w}x{h} len {len}");
-    assert!(w <= sw && h <= sh, "payload {w}x{h} larger than source {sw}x{sh}");
+    assert!(
+        w > 0 && h > 0 && len == (w * h * 4) as usize,
+        "bad frame {w}x{h} len {len}"
+    );
+    assert!(
+        w <= sw && h <= sh,
+        "payload {w}x{h} larger than source {sw}x{sh}"
+    );
     assert!(stats.frames > 0, "no frames in the 5 s window");
 }
 
 #[test]
 fn it_hid_client_ready_displaced_reclaimed() {
-    let Some(udid) = support::booted_udid() else { return };
+    let Some(udid) = support::booted_udid() else {
+        return;
+    };
     let (tx, rx) = mpsc::channel();
     let tx = Mutex::new(tx);
-    let client = HidClient::spawn(helper_dir(None).join("sdhid"), vec![udid.clone()], move |e| {
-        let _ = tx.lock().unwrap().send(e);
-    })
+    let client = HidClient::spawn(
+        helper_dir(None).join("sdhid"),
+        vec![udid.clone()],
+        move |e| {
+            let _ = tx.lock().unwrap().send(e);
+        },
+    )
     .expect("spawn sdhid");
     let mut seen = Vec::new();
     let mut expect = |want: &str, within: Duration| -> Duration {
@@ -180,7 +241,10 @@ fn it_hid_client_ready_displaced_reclaimed() {
                 Ok(e) => {
                     seen.push(format!("{e:?}"));
                     let name = format!("{e:?}");
-                    assert!(name.starts_with(want), "expected {want}, got {e:?}; history {seen:?}");
+                    assert!(
+                        name.starts_with(want),
+                        "expected {want}, got {e:?}; history {seen:?}"
+                    );
                     return t0.elapsed();
                 }
                 Err(_) => panic!("no {want} within {within:?}; history {seen:?}"),
@@ -206,5 +270,7 @@ fn it_hid_client_ready_displaced_reclaimed() {
     let pid = client.pid().unwrap();
     drop(client);
     assert!(pid_gone(pid), "sdhid survived HidClient drop");
-    eprintln!("ready after {ready:?} ({w}x{h} pt); displaced after {displaced:?}; reclaimed after {reclaimed:?}");
+    eprintln!(
+        "ready after {ready:?} ({w}x{h} pt); displaced after {displaced:?}; reclaimed after {reclaimed:?}"
+    );
 }

@@ -58,7 +58,7 @@ impl ShmReader {
             return Err(Error::Shm("zero slots".into()));
         }
         let cname = CString::new(name).map_err(|_| Error::Shm("bad name".into()))?;
-        if cap % 8 != 0 {
+        if !cap.is_multiple_of(8) {
             return Err(Error::Shm(format!("cap {cap} not a multiple of 8")));
         }
         let len = total_len(slots, cap)?;
@@ -75,9 +75,19 @@ impl ShmReader {
             }
             if (st.st_size as usize) < len {
                 libc::close(fd);
-                return Err(Error::Shm(format!("segment {} bytes, need {len}", st.st_size)));
+                return Err(Error::Shm(format!(
+                    "segment {} bytes, need {len}",
+                    st.st_size
+                )));
             }
-            let p = libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, fd, 0);
+            let p = libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
             let mmap_err = (p == libc::MAP_FAILED).then(|| last_os("mmap"));
             libc::close(fd);
             if let Some(e) = mmap_err {
@@ -93,7 +103,12 @@ impl ShmReader {
                 libc::munmap(p, len);
                 return Err(Error::Shm("bad segment header".into()));
             }
-            Ok(ShmReader { base, len, slots, cap })
+            Ok(ShmReader {
+                base,
+                len,
+                slots,
+                cap,
+            })
         }
     }
 
@@ -104,7 +119,7 @@ impl ShmReader {
 
     /// Copy out the frame in `slot` if it still carries `seq`; None if torn or overwritten.
     pub fn read(&self, slot: u32, seq: u64) -> Option<Frame> {
-        if slot >= self.slots || seq % 2 != 0 {
+        if slot >= self.slots || !seq.is_multiple_of(2) {
             return None;
         }
         let p = self.slot_ptr(slot);
@@ -129,7 +144,14 @@ impl ShmReader {
             if seq_word.load(Ordering::Relaxed) != seq {
                 return None;
             }
-            Some(Frame { width, height, source_width, source_height, seq, data })
+            Some(Frame {
+                width,
+                height,
+                source_width,
+                source_height,
+                seq,
+                data,
+            })
         }
     }
 }
@@ -165,7 +187,11 @@ impl ShmWriter {
         let cname = CString::new(name).map_err(|_| Error::Shm("bad name".into()))?;
         let len = total_len(slots, cap)?;
         unsafe {
-            let fd = libc::shm_open(cname.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, 0o600);
+            let fd = libc::shm_open(
+                cname.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+                0o600,
+            );
             if fd < 0 {
                 return Err(last_os("shm_open"));
             }
@@ -175,7 +201,14 @@ impl ShmWriter {
                 libc::shm_unlink(cname.as_ptr());
                 return Err(e);
             }
-            let p = libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0);
+            let p = libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
             libc::close(fd);
             if p == libc::MAP_FAILED {
                 let e = last_os("mmap");
@@ -188,12 +221,20 @@ impl ShmWriter {
             (base.add(8) as *mut u32).write(slots);
             (base.add(12) as *mut u32).write(0);
             (base.add(16) as *mut u64).write(cap);
-            Ok(ShmWriter { name: cname, base, len, cap })
+            Ok(ShmWriter {
+                name: cname,
+                base,
+                len,
+                cap,
+            })
         }
     }
 
     fn slot_ptr(&self, slot: u32) -> *mut u8 {
-        unsafe { self.base.add(FILE_HEADER + slot as usize * (SLOT_HEADER + self.cap as usize)) }
+        unsafe {
+            self.base
+                .add(FILE_HEADER + slot as usize * (SLOT_HEADER + self.cap as usize))
+        }
     }
 
     /// Full seqlock write: odd, header+pixels, then `seq_even`.
@@ -213,12 +254,17 @@ impl ShmWriter {
 
     /// Start a write: Relaxed odd store then Release fence (leaves the slot "torn").
     pub(crate) fn begin(&self, slot: u32, seq_even: u64) {
-        unsafe { AtomicU64::from_ptr(self.slot_ptr(slot) as *mut u64).store(seq_even - 1, Ordering::Relaxed) }
+        unsafe {
+            AtomicU64::from_ptr(self.slot_ptr(slot) as *mut u64)
+                .store(seq_even - 1, Ordering::Relaxed)
+        }
         fence(Ordering::Release);
     }
 
     pub(crate) fn finish(&self, slot: u32, seq_even: u64) {
-        unsafe { AtomicU64::from_ptr(self.slot_ptr(slot) as *mut u64).store(seq_even, Ordering::Release) }
+        unsafe {
+            AtomicU64::from_ptr(self.slot_ptr(slot) as *mut u64).store(seq_even, Ordering::Release)
+        }
     }
 }
 
@@ -241,7 +287,12 @@ mod tests {
     }
 
     fn hdr(w: u32, h: u32) -> FrameHeader {
-        FrameHeader { width: w, height: h, source_width: 100, source_height: 200 }
+        FrameHeader {
+            width: w,
+            height: h,
+            source_width: 100,
+            source_height: 200,
+        }
     }
 
     #[test]
@@ -252,7 +303,17 @@ mod tests {
         w.write(1, 2, &hdr(2, 2), &px);
         let r = ShmReader::open(&n, 3, 16).unwrap();
         let f = r.read(1, 2).unwrap();
-        assert_eq!(f, Frame { width: 2, height: 2, source_width: 100, source_height: 200, seq: 2, data: px });
+        assert_eq!(
+            f,
+            Frame {
+                width: 2,
+                height: 2,
+                source_width: 100,
+                source_height: 200,
+                seq: 2,
+                data: px
+            }
+        );
     }
 
     #[test]

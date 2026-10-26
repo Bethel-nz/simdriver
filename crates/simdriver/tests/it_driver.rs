@@ -45,14 +45,20 @@ fn frame_shows_bar(f: &simdriver::Frame) -> bool {
         (0..samples)
             .map(|s| lum(row * w + s * (w - 1) / samples))
             .filter(|&l| if white { l > 215 } else { l < 60 })
-            .count() * 20
+            .count()
+            * 20
             >= samples * 19 // ≥ 95% of the row
     };
     let mut white = 0;
     for row in (100..h.saturating_sub(100)).step_by(2) {
         if row_is(row, true) {
             white += 1;
-            if white >= 3 && row >= 8 + 100 && row + 8 < h && row_is(row - 8, false) && row_is(row + 8, false) {
+            if white >= 3
+                && row >= 8 + 100
+                && row + 8 < h
+                && row_is(row - 8, false)
+                && row_is(row + 8, false)
+            {
                 return true;
             }
         } else {
@@ -91,7 +97,13 @@ impl Rec {
     }
 
     fn states(&self) -> Vec<State> {
-        self.0.lock().unwrap().states.iter().map(|(_, s)| *s).collect()
+        self.0
+            .lock()
+            .unwrap()
+            .states
+            .iter()
+            .map(|(_, s)| *s)
+            .collect()
     }
 
     fn frames(&self) -> usize {
@@ -111,7 +123,10 @@ impl Rec {
             if self.loaded() {
                 return;
             }
-            assert!(t0.elapsed() < within, "tap.html never loaded (no bar) within {within:?}");
+            assert!(
+                t0.elapsed() < within,
+                "tap.html never loaded (no bar) within {within:?}"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -131,7 +146,10 @@ impl Rec {
                 }
                 if t0.elapsed() >= within {
                     let tail: Vec<&String> = l.notes.iter().rev().take(8).collect();
-                    panic!("no {want:?} within {within:?}; states {:?}; last notes {tail:?}", self.states_of(&l));
+                    panic!(
+                        "no {want:?} within {within:?}; states {:?}; last notes {tail:?}",
+                        self.states_of(&l)
+                    );
                 }
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -159,19 +177,26 @@ impl Rec {
             if recent >= 30 {
                 return;
             }
-            assert!(t0.elapsed() < within, "page not animating after {within:?} ({recent} frames in the last 1 s)");
+            assert!(
+                t0.elapsed() < within,
+                "page not animating after {within:?} ({recent} frames in the last 1 s)"
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
     }
 
     /// Wait until the centre luminance satisfies `pred`.
-    fn wait_centre(&self, within: Duration, pred: impl Fn(u8) -> bool) -> Result<Duration, Option<u8>> {
+    fn wait_centre(
+        &self,
+        within: Duration,
+        pred: impl Fn(u8) -> bool,
+    ) -> Result<Duration, Option<u8>> {
         let t0 = Instant::now();
         loop {
-            if let Some(l) = self.centre() {
-                if pred(l) {
-                    return Ok(t0.elapsed());
-                }
+            if let Some(l) = self.centre()
+                && pred(l)
+            {
+                return Ok(t0.elapsed());
             }
             if t0.elapsed() >= within {
                 return Err(self.centre());
@@ -182,7 +207,10 @@ impl Rec {
 }
 
 fn opts(udid: &str) -> Options {
-    Options { device: DeviceSelector::Udid(udid.to_string()), ..Options::default() }
+    Options {
+        device: DeviceSelector::Udid(udid.to_string()),
+        ..Options::default()
+    }
 }
 
 fn start(udid: &str, rec: &Rec) -> Driver {
@@ -237,7 +265,9 @@ fn not_booted_is_an_error() {
 
 #[test]
 fn it_streams_60fps() {
-    let Some(udid) = support::booted_udid() else { return };
+    let Some(udid) = support::booted_udid() else {
+        return;
+    };
     let _server = support::open_page(&udid, "anim.html");
     let rec = Rec::default();
     let d = start(&udid, &rec);
@@ -253,29 +283,50 @@ fn it_streams_60fps() {
     let fs = FrameStats::over_window(&rec.0.lock().unwrap().frames, start, end);
     eprintln!("{fs:?}; driver stats {stats:?}");
     fs.assert_live_60();
-    assert!(stats.fps >= 50.0, "Stats.fps {} disagrees with the delivered rate", stats.fps);
+    assert!(
+        stats.fps >= 50.0,
+        "Stats.fps {} disagrees with the delivered rate",
+        stats.fps
+    );
     assert_eq!(rec.states().last(), Some(&State::Stopped));
 }
 
 #[test]
 fn second_driver_replaces_first() {
-    let Some(udid) = support::booted_udid() else { return };
+    let Some(udid) = support::booted_udid() else {
+        return;
+    };
     let (ra, rb) = (Rec::default(), Rec::default());
     let a = start(&udid, &ra);
     let pids = a.__helper_pids();
     assert_eq!(pids.len(), 2, "sdframe + sdhid pids, got {pids:?}");
     let b = start(&udid, &rb);
     assert_eq!(a.state(), State::Stopped);
-    assert_eq!(ra.states().last(), Some(&State::Stopped), "first driver's last event must be Stopped");
+    assert_eq!(
+        ra.states().last(),
+        Some(&State::Stopped),
+        "first driver's last event must be Stopped"
+    );
     for pid in &pids {
-        assert!(pid_gone(*pid), "first driver's helper {pid} survived the replacement");
+        assert!(
+            pid_gone(*pid),
+            "first driver's helper {pid} survived the replacement"
+        );
     }
     rb.wait_state(0, State::Live, LIVE_WAIT);
     assert!(rb.frames() > 0);
     let a_events = ra.0.lock().unwrap().states.len();
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(ra.0.lock().unwrap().states.len(), a_events, "events after Stopped");
-    assert_eq!(ra.0.lock().unwrap().after_stopped, 0, "first driver reported after Stopped");
+    assert_eq!(
+        ra.0.lock().unwrap().states.len(),
+        a_events,
+        "events after Stopped"
+    );
+    assert_eq!(
+        ra.0.lock().unwrap().after_stopped,
+        0,
+        "first driver reported after Stopped"
+    );
     a.stop(); // idempotent, and must not touch the new driver
     assert_eq!(b.state(), State::Live);
     let b_pids = b.__helper_pids();
@@ -288,7 +339,9 @@ fn second_driver_replaces_first() {
 
 #[test]
 fn it_tap_latency() {
-    let Some(udid) = support::booted_udid() else { return };
+    let Some(udid) = support::booted_udid() else {
+        return;
+    };
     if !support::input_allowed(&udid) {
         return;
     }
@@ -308,7 +361,10 @@ fn it_tap_latency() {
             if let Some(r) = d.stats().last_response_ms {
                 break r;
             }
-            assert!(t0.elapsed() < Duration::from_secs(2), "tap {i}: no frame after the down");
+            assert!(
+                t0.elapsed() < Duration::from_secs(2),
+                "tap {i}: no frame after the down"
+            );
             std::thread::sleep(Duration::from_millis(2));
         };
         rec.wait_centre(Duration::from_secs(2), is_white)
@@ -316,7 +372,9 @@ fn it_tap_latency() {
         seen_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
         d.pointer(Phase::Up, 0.5, 0.5, no_mods());
         rec.wait_centre(Duration::from_secs(2), is_black)
-            .unwrap_or_else(|last| panic!("tap {i}: page never turned black after up (last {last:?})"));
+            .unwrap_or_else(|last| {
+                panic!("tap {i}: page never turned black after up (last {last:?})")
+            });
         ms.push(r);
         std::thread::sleep(Duration::from_millis(150));
     }
@@ -333,7 +391,9 @@ fn it_tap_latency() {
 
 #[test]
 fn it_displaced_then_reclaimed() {
-    let Some(udid) = support::booted_udid() else { return };
+    let Some(udid) = support::booted_udid() else {
+        return;
+    };
     if !support::input_allowed(&udid) {
         return;
     }
@@ -352,19 +412,27 @@ fn it_displaced_then_reclaimed() {
     let t_streaming = Instant::now();
     rec.wait_streaming_since(t_streaming, Duration::from_secs(5));
     let streaming = t_streaming.elapsed();
-    assert_eq!(d.state(), State::InputDisplaced, "reclaimed before any input");
+    assert_eq!(
+        d.state(),
+        State::InputDisplaced,
+        "reclaimed before any input"
+    );
 
     let from = rec.states().len();
     d.pointer(Phase::Down, 0.5, 0.5, no_mods());
     let reclaimed = rec.wait_state(from, State::Live, Duration::from_secs(2));
     d.pointer(Phase::Up, 0.5, 0.5, no_mods());
     assert_eq!(d.state(), State::Live);
-    eprintln!("displaced after {displaced:?}; streaming while displaced within {streaming:?}; live again {reclaimed:?} after the down");
+    eprintln!(
+        "displaced after {displaced:?}; streaming while displaced within {streaming:?}; live again {reclaimed:?} after the down"
+    );
 }
 
 #[test]
 fn it_survives_sim_reboot() {
-    let Some(udid) = support::booted_udid() else { return };
+    let Some(udid) = support::booted_udid() else {
+        return;
+    };
     if std::env::var("SIMDRIVER_IT_REBOOT").as_deref() != Ok("1") {
         eprintln!("skipping: set SIMDRIVER_IT_REBOOT=1 to shut down and reboot the test simulator");
         return;
@@ -396,7 +464,10 @@ fn it_survives_sim_reboot() {
     // Live may already be back before `boot` returns (the device reports Booted before
     // bootstatus finishes); either way within 30 s of the boot.
     let live = rec.wait_state(from, State::Live, Duration::from_secs(30));
-    assert!(rec.frames() > frames_at_restart, "no frames after the reboot");
+    assert!(
+        rec.frames() > frames_at_restart,
+        "no frames after the reboot"
+    );
     let pids_after = d.__helper_pids();
     eprintln!("pids before shutdown {pids_before:?} -> after live {pids_after:?}");
 
@@ -410,7 +481,13 @@ fn it_survives_sim_reboot() {
     }
     if !rec.loaded() {
         let _ = Command::new("xcrun")
-            .args(["simctl", "launch", &udid, "com.apple.mobilesafari", &_server.url()])
+            .args([
+                "simctl",
+                "launch",
+                &udid,
+                "com.apple.mobilesafari",
+                &_server.url(),
+            ])
             .status();
         rec.wait_loaded(Duration::from_secs(15));
     }
@@ -419,14 +496,32 @@ fn it_survives_sim_reboot() {
     }
     let from = rec.states().len();
     d.pointer(Phase::Down, 0.5, 0.5, no_mods());
-    if rec.states().iter().skip(from).any(|s| *s == State::InputDisplaced) || d.state() == State::InputDisplaced {
+    if rec
+        .states()
+        .iter()
+        .skip(from)
+        .any(|s| *s == State::InputDisplaced)
+        || d.state() == State::InputDisplaced
+    {
         rec.wait_state(from, State::Live, Duration::from_secs(2));
     }
     let white = rec.wait_centre(Duration::from_secs(3), is_white);
     d.pointer(Phase::Up, 0.5, 0.5, no_mods());
     let white = white.unwrap_or_else(|last| {
-        let notes = rec.0.lock().unwrap().notes.iter().rev().take(10).cloned().collect::<Vec<_>>();
-        panic!("touch after reboot never landed (last {last:?}); states {:?}; notes {notes:?}", rec.states())
+        let notes = rec
+            .0
+            .lock()
+            .unwrap()
+            .notes
+            .iter()
+            .rev()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>();
+        panic!(
+            "touch after reboot never landed (last {last:?}); states {:?}; notes {notes:?}",
+            rec.states()
+        )
     });
     eprintln!(
         "Restarting {restarting:?} after shutdown; booted after {booted:?}; Live {live:?} after Restarting; touch landed in {white:?}; states {:?}",
@@ -438,26 +533,40 @@ fn it_survives_sim_reboot() {
 /// centre through the HID path, and see the General page in the next snapshots.
 #[test]
 fn it_accessibility_finds_and_taps() {
-    let Some(udid) = support::booted_udid() else { return };
+    let Some(udid) = support::booted_udid() else {
+        return;
+    };
     if !support::input_allowed(&udid) {
         return;
     }
-    let _ = Command::new("xcrun").args(["simctl", "terminate", &udid, "com.apple.Preferences"]).status();
-    let ok = Command::new("xcrun").args(["simctl", "launch", &udid, "com.apple.Preferences"]).status();
+    let _ = Command::new("xcrun")
+        .args(["simctl", "terminate", &udid, "com.apple.Preferences"])
+        .status();
+    let ok = Command::new("xcrun")
+        .args(["simctl", "launch", &udid, "com.apple.Preferences"])
+        .status();
     assert!(ok.is_ok_and(|s| s.success()), "could not launch Settings");
     let rec = Rec::default();
     let d = start(&udid, &rec);
     rec.wait_state(0, State::Live, LIVE_WAIT);
     let labelled = |root: &simdriver::AxNode, role: &str, label: &str| {
-        root.descendants().into_iter().find(|n| n.role == role && n.label.as_deref() == Some(label)).cloned()
+        root.descendants()
+            .into_iter()
+            .find(|n| n.role == role && n.label.as_deref() == Some(label))
+            .cloned()
     };
     let t0 = Instant::now();
     let general = loop {
-        let root = d.accessibility().unwrap_or_else(|e| panic!("snapshot: {e}"));
+        let root = d
+            .accessibility()
+            .unwrap_or_else(|e| panic!("snapshot: {e}"));
         if let Some(n) = labelled(&root, "AXButton", "General") {
             break n;
         }
-        assert!(t0.elapsed() < Duration::from_secs(20), "Settings never showed a General row");
+        assert!(
+            t0.elapsed() < Duration::from_secs(20),
+            "Settings never showed a General row"
+        );
         std::thread::sleep(Duration::from_millis(200));
     };
     let mut warm = Vec::new();
@@ -479,7 +588,10 @@ fn it_accessibility_finds_and_taps() {
         if labelled(&root, "AXButton", "About").is_some() {
             break;
         }
-        assert!(t0.elapsed() < Duration::from_secs(10), "the General page never appeared");
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "the General page never appeared"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
     d.stop();

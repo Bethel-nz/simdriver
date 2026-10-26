@@ -101,7 +101,11 @@ pub fn elements(frame: &Frame, screen: (f64, f64), els: &[Element]) -> Vec<u8> {
     let t = (k * 1.5).round().max(2.0) as i64;
     let s = (k * 1.4).round().max(2.0) as i64;
     for (i, e) in els.iter().enumerate() {
-        let color = if e.visibility == Visibility::Covered { COVERED } else { PALETTE[i % PALETTE.len()] };
+        let color = if e.visibility == Visibility::Covered {
+            COVERED
+        } else {
+            PALETTE[i % PALETTE.len()]
+        };
         let f = e.frame;
         let (x0, y0) = ((f[0] * k) as i64, (f[1] * k) as i64);
         let (x1, y1) = (((f[0] + f[2]) * k) as i64, ((f[1] + f[3]) * k) as i64);
@@ -143,11 +147,14 @@ pub fn crop(frame: &Frame, screen: (f64, f64), rect: [f64; 4]) -> Option<Vec<u8>
     let y0 = (rect[1] * k).floor().max(0.0) as usize;
     let x1 = ((rect[0] + rect[2]) * k).ceil().min(frame.width as f64) as usize;
     let y1 = ((rect[1] + rect[3]) * k).ceil().min(frame.height as f64) as usize;
-    if x1 <= x0 || y1 <= y0 { return None; }
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
     let (w, h) = (x1 - x0, y1 - y0);
     let mut rgb = Vec::with_capacity(w * h * 3);
     for y in y0..y1 {
-        let row = &frame.data[(y * frame.width as usize + x0) * 4..(y * frame.width as usize + x1) * 4];
+        let row =
+            &frame.data[(y * frame.width as usize + x0) * 4..(y * frame.width as usize + x1) * 4];
         for p in row.as_chunks::<4>().0 {
             rgb.extend_from_slice(&[p[2], p[1], p[0]]);
         }
@@ -213,11 +220,20 @@ mod tests {
     use crate::marks::{elements as marks, tests::settings};
 
     fn frame(w: u32, h: u32) -> Frame {
-        Frame { width: w, height: h, source_width: w, source_height: h, seq: 2, data: vec![0x20; (w * h * 4) as usize] }
+        Frame {
+            width: w,
+            height: h,
+            source_width: w,
+            source_height: h,
+            seq: 2,
+            data: vec![0x20; (w * h * 4) as usize],
+        }
     }
 
     fn decode(png_bytes: &[u8]) -> (u32, u32, Vec<u8>) {
-        let mut r = png::Decoder::new(std::io::Cursor::new(png_bytes)).read_info().unwrap();
+        let mut r = png::Decoder::new(std::io::Cursor::new(png_bytes))
+            .read_info()
+            .unwrap();
         let mut buf = vec![0; r.output_buffer_size().unwrap()];
         let info = r.next_frame(&mut buf).unwrap();
         (info.width, info.height, buf)
@@ -244,7 +260,11 @@ mod tests {
         let (els, _) = marks(&settings(), (400.0, 800.0));
         let passcode = els.iter().find(|e| e.name() == "Passcode").unwrap();
         assert_eq!(passcode.visibility, Visibility::Covered);
-        let (w, _, px) = decode(&elements(&frame(400, 800), (400.0, 800.0), std::slice::from_ref(passcode)));
+        let (w, _, px) = decode(&elements(
+            &frame(400, 800),
+            (400.0, 800.0),
+            std::slice::from_ref(passcode),
+        ));
         let i = ((775 * w + 17) * 3) as usize; // its left edge
         assert_eq!([px[i], px[i + 1], px[i + 2]], COVERED);
     }

@@ -168,8 +168,21 @@ mod tests {
                 {"action":"press","button":"home"}]"#,
         )
         .unwrap();
-        assert_eq!(steps[0], Step::Fill { target: "Email".into(), value: "a@b.c".into(), secret: false });
-        assert_eq!(steps[2], Step::WaitFor { text: "Welcome".into(), timeout_ms: Some(2000) });
+        assert_eq!(
+            steps[0],
+            Step::Fill {
+                target: "Email".into(),
+                value: "a@b.c".into(),
+                secret: false
+            }
+        );
+        assert_eq!(
+            steps[2],
+            Step::WaitFor {
+                text: "Welcome".into(),
+                timeout_ms: Some(2000)
+            }
+        );
         let steps: Vec<Step> = serde_json::from_str(
             r#"[{"action":"longPress","target":"e4"},
                 {"action":"longPress","target":"General","ms":1500},
@@ -189,20 +202,92 @@ mod tests {
                 {"action":"drag","from":"e1","to":"e2","sourceHoldMs":300,"moveMs":400,"destinationHoldMs":50}]"#,
         )
         .unwrap();
-        assert_eq!(steps[0], Step::LongPress { target: "e4".into(), ms: None });
-        assert_eq!(steps[1], Step::LongPress { target: "General".into(), ms: Some(1500) });
-        assert_eq!(steps[2], Step::Drag { from: "e1".into(), to: "C4".into(), source_hold_ms: None, move_ms: None, destination_hold_ms: None });
-        assert_eq!(steps[3], Step::Drag { from: "Email".into(), to: "Log in".into(), source_hold_ms: None, move_ms: Some(1200), destination_hold_ms: None });
-        assert_eq!(steps[4], Step::Pinch { target: None, scale: 2.0 });
-        assert_eq!(steps[5], Step::Rotate { target: Some("Map".into()), degrees: 90.0 });
-        assert_eq!(steps[6], Step::Key { name: "cmd+a".into() });
-        assert_eq!(steps[7], Step::OpenUrl { url: "https://example.com".into() });
+        assert_eq!(
+            steps[0],
+            Step::LongPress {
+                target: "e4".into(),
+                ms: None
+            }
+        );
+        assert_eq!(
+            steps[1],
+            Step::LongPress {
+                target: "General".into(),
+                ms: Some(1500)
+            }
+        );
+        assert_eq!(
+            steps[2],
+            Step::Drag {
+                from: "e1".into(),
+                to: "C4".into(),
+                source_hold_ms: None,
+                move_ms: None,
+                destination_hold_ms: None
+            }
+        );
+        assert_eq!(
+            steps[3],
+            Step::Drag {
+                from: "Email".into(),
+                to: "Log in".into(),
+                source_hold_ms: None,
+                move_ms: Some(1200),
+                destination_hold_ms: None
+            }
+        );
+        assert_eq!(
+            steps[4],
+            Step::Pinch {
+                target: None,
+                scale: 2.0
+            }
+        );
+        assert_eq!(
+            steps[5],
+            Step::Rotate {
+                target: Some("Map".into()),
+                degrees: 90.0
+            }
+        );
+        assert_eq!(
+            steps[6],
+            Step::Key {
+                name: "cmd+a".into()
+            }
+        );
+        assert_eq!(
+            steps[7],
+            Step::OpenUrl {
+                url: "https://example.com".into()
+            }
+        );
         assert_eq!(steps[8], Step::SetLocation { lat: 6.5, lon: 3.3 });
-        assert_eq!(steps[9], Step::Appearance { appearance: "dark".into() });
+        assert_eq!(
+            steps[9],
+            Step::Appearance {
+                appearance: "dark".into()
+            }
+        );
         assert_eq!(steps[10], Step::KeyboardDismiss);
-        assert_eq!(steps[11], Step::Back { mode: "inApp".into() });
-        assert_eq!(steps[12], Step::ScreenshotElement { target: "e1".into() });
-        assert_eq!(steps[13], Step::Launch { bundle_id: "com.apple.Preferences".into() });
+        assert_eq!(
+            steps[11],
+            Step::Back {
+                mode: "inApp".into()
+            }
+        );
+        assert_eq!(
+            steps[12],
+            Step::ScreenshotElement {
+                target: "e1".into()
+            }
+        );
+        assert_eq!(
+            steps[13],
+            Step::Launch {
+                bundle_id: "com.apple.Preferences".into()
+            }
+        );
         assert_eq!(
             steps[14],
             Step::Swipe {
@@ -222,7 +307,13 @@ mod tests {
                 destination_hold_ms: Some(50)
             }
         );
-        assert!(serde_json::from_str::<Step>(r#"{"action":"launch","bundle_id":"x"}"#).is_err(), "camelCase only");
-        assert!(serde_json::from_str::<Step>(r#"{"action":"tap","targt":"x"}"#).is_err(), "typos are errors");
+        assert!(
+            serde_json::from_str::<Step>(r#"{"action":"launch","bundle_id":"x"}"#).is_err(),
+            "camelCase only"
+        );
+        assert!(
+            serde_json::from_str::<Step>(r#"{"action":"tap","targt":"x"}"#).is_err(),
+            "typos are errors"
+        );
     }
 }

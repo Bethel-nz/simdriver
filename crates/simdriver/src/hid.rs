@@ -26,7 +26,10 @@ pub const QUEUE_CAP: usize = 256;
 /// What the HID helper reports to the owner.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HidEvent {
-    Ready { w: f64, h: f64 },
+    Ready {
+        w: f64,
+        h: f64,
+    },
     Displaced,
     Reclaimed,
     Warn(String),
@@ -36,13 +39,22 @@ pub enum HidEvent {
     /// The current helper exited (`code` is `None` if killed by a signal; `last_stderr` is
     /// its last stderr line). The owner decides whether and when to `restart`; commands
     /// queue meanwhile. Not reported for a helper replaced by `restart` or ended by `stop`.
-    Exited { code: Option<i32>, last_stderr: Option<String> },
+    Exited {
+        code: Option<i32>,
+        last_stderr: Option<String>,
+    },
 }
 
 fn is_move(cmd: &HidCmd) -> bool {
     matches!(
         cmd,
-        HidCmd::Touch { phase: Phase::Move, .. } | HidCmd::Touch2 { phase: Phase::Move, .. }
+        HidCmd::Touch {
+            phase: Phase::Move,
+            ..
+        } | HidCmd::Touch2 {
+            phase: Phase::Move,
+            ..
+        }
     )
 }
 
@@ -118,7 +130,9 @@ impl Shared {
     }
 
     fn on_line(&self, generation: u64, line: &str) {
-        let Some(msg) = parse_hid_line(line) else { return };
+        let Some(msg) = parse_hid_line(line) else {
+            return;
+        };
         let ev = {
             let mut st = lock(&self.state);
             if st.generation != generation {
@@ -233,7 +247,10 @@ impl HidClient {
     }
 
     pub fn pid(&self) -> Option<u32> {
-        lock(&self.shared.state).helper.as_ref().map(Supervised::pid)
+        lock(&self.shared.state)
+            .helper
+            .as_ref()
+            .map(Supervised::pid)
     }
 
     /// Stop the current helper (if any) and spawn a fresh one. Commands queue until its
@@ -251,8 +268,11 @@ impl HidClient {
             (st.generation, st.helper.take())
         };
         drop(old); // stop() outside the state lock: it may wait up to 250 ms
-        let (s1, s2, s3) =
-            (Arc::downgrade(&self.shared), Arc::downgrade(&self.shared), Arc::downgrade(&self.shared));
+        let (s1, s2, s3) = (
+            Arc::downgrade(&self.shared),
+            Arc::downgrade(&self.shared),
+            Arc::downgrade(&self.shared),
+        );
         let helper = Supervised::spawn_with_stderr(
             self.shared.bin.clone(),
             self.shared.args.clone(),
@@ -320,11 +340,22 @@ mod tests {
     const W: Duration = Duration::from_secs(5);
 
     fn touch(phase: Phase, x: f64) -> HidCmd {
-        HidCmd::Touch { phase, x, y: 0.0, edge: Edge::None }
+        HidCmd::Touch {
+            phase,
+            x,
+            y: 0.0,
+            edge: Edge::None,
+        }
     }
 
     fn touch2(phase: Phase, x: f64) -> HidCmd {
-        HidCmd::Touch2 { phase, x1: x, y1: 0.0, x2: 0.0, y2: 0.0 }
+        HidCmd::Touch2 {
+            phase,
+            x1: x,
+            y1: 0.0,
+            x2: 0.0,
+            y2: 0.0,
+        }
     }
 
     struct Fake {
@@ -354,10 +385,17 @@ mod tests {
             let dir = std::env::temp_dir().join(format!("sdhid-fake-{}-{tag}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
-            let client =
-                HidClient::spawn(fake_helper(), vec!["hid".into(), dir.to_string_lossy().into_owned()], on_event)
-                    .unwrap();
-            Fake { dir, client, events: mpsc::channel().1 }
+            let client = HidClient::spawn(
+                fake_helper(),
+                vec!["hid".into(), dir.to_string_lossy().into_owned()],
+                on_event,
+            )
+            .unwrap();
+            Fake {
+                dir,
+                client,
+                events: mpsc::channel().1,
+            }
         }
 
         fn go(&self) {
@@ -394,7 +432,11 @@ mod tests {
                 if log.last() == Some(&want) {
                     return log[..log.len() - 1].to_vec();
                 }
-                assert!(t0.elapsed() < W, "sentinel never reached the helper; log has {} lines", log.len());
+                assert!(
+                    t0.elapsed() < W,
+                    "sentinel never reached the helper; log has {} lines",
+                    log.len()
+                );
                 std::thread::sleep(Duration::from_millis(5));
             }
         }
@@ -413,14 +455,21 @@ mod tests {
         assert_eq!(v[0], touch(Phase::Down, 0.0));
         assert_eq!(v[QUEUE_CAP - 1], touch(Phase::Up, 0.0));
         let moves: Vec<HidCmd> = (47..=300).map(|i| touch(Phase::Move, i as f64)).collect();
-        assert_eq!(&v[1..QUEUE_CAP - 1], &moves[..], "the newest 254 moves, in order");
+        assert_eq!(
+            &v[1..QUEUE_CAP - 1],
+            &moves[..],
+            "the newest 254 moves, in order"
+        );
 
         // Full of non-moves: new moves are refused, starts/ends are still kept.
         let mut q = Queue::default();
         for i in 0..QUEUE_CAP {
             assert!(q.push(HidCmd::Key { code: i as u32 }));
         }
-        assert!(!q.push(touch2(Phase::Move, 1.0)), "move refused when no move can be evicted");
+        assert!(
+            !q.push(touch2(Phase::Move, 1.0)),
+            "move refused when no move can be evicted"
+        );
         assert!(q.push(touch2(Phase::Down, 1.0)), "starts are never dropped");
         assert!(q.push(touch(Phase::Up, 1.0)), "ends are never dropped");
         let v: Vec<HidCmd> = q.drain().collect();
@@ -439,7 +488,10 @@ mod tests {
         f.client.send(touch(Phase::Up, 0.0));
         assert_eq!(f.client.screen_pt(), None);
         std::thread::sleep(Duration::from_millis(50));
-        assert!(f.log().is_empty(), "nothing may reach the helper before Ready");
+        assert!(
+            f.log().is_empty(),
+            "nothing may reach the helper before Ready"
+        );
 
         f.go();
         f.expect(HidEvent::Ready { w: 393.0, h: 852.0 });
@@ -466,7 +518,13 @@ mod tests {
         f.expect(HidEvent::Reclaimed);
         assert!(!f.client.is_displaced());
         let got = f.sync(9998);
-        assert_eq!(got, vec![touch(Phase::Move, 1.0).to_line(), touch(Phase::Down, 2.0).to_line()]);
+        assert_eq!(
+            got,
+            vec![
+                touch(Phase::Move, 1.0).to_line(),
+                touch(Phase::Down, 2.0).to_line()
+            ]
+        );
     }
 
     #[test]
@@ -476,14 +534,23 @@ mod tests {
         f.expect(HidEvent::Ready { w: 393.0, h: 852.0 });
         let old = f.client.pid().unwrap();
         f.client.send_raw_line(r#"{"t":"_exit","code":5}"#);
-        f.expect(HidEvent::Exited { code: Some(5), last_stderr: Some("fake_helper: exiting 5".into()) });
+        f.expect(HidEvent::Exited {
+            code: Some(5),
+            last_stderr: Some("fake_helper: exiting 5".into()),
+        });
         f.client.send(touch(Phase::Down, 3.0));
         f.client.send(touch(Phase::Up, 3.0));
         f.client.restart().unwrap();
         assert_ne!(f.client.pid(), Some(old));
         f.expect(HidEvent::Ready { w: 393.0, h: 852.0 });
         let got = f.sync(9997);
-        assert_eq!(got, vec![touch(Phase::Down, 3.0).to_line(), touch(Phase::Up, 3.0).to_line()]);
+        assert_eq!(
+            got,
+            vec![
+                touch(Phase::Down, 3.0).to_line(),
+                touch(Phase::Up, 3.0).to_line()
+            ]
+        );
     }
 
     #[test]
@@ -506,10 +573,17 @@ mod tests {
         f.go();
         in_rx.recv_timeout(W).expect("on_event entered");
         f.client.stop();
-        assert!(done.load(Ordering::SeqCst), "stop returned while on_event was still running");
+        assert!(
+            done.load(Ordering::SeqCst),
+            "stop returned while on_event was still running"
+        );
         assert!(matches!(erx.recv_timeout(W), Ok(HidEvent::Ready { .. })));
         std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(erx.try_recv().ok(), None, "on_event ran after stop (e.g. Exited)");
+        assert_eq!(
+            erx.try_recv().ok(),
+            None,
+            "on_event ran after stop (e.g. Exited)"
+        );
     }
 
     #[test]
@@ -522,21 +596,33 @@ mod tests {
         let dtx = Mutex::new(dtx);
         let s2 = slot.clone();
         let client = Arc::new(
-            HidClient::spawn(fake_helper(), vec!["hid".into(), dir.to_string_lossy().into_owned()], move |e| {
-                if matches!(e, HidEvent::Ready { .. }) {
-                    let c = s2.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade);
-                    if let Some(c) = c {
-                        c.stop();
-                        let _ = dtx.lock().unwrap().send(c.pid());
+            HidClient::spawn(
+                fake_helper(),
+                vec!["hid".into(), dir.to_string_lossy().into_owned()],
+                move |e| {
+                    if matches!(e, HidEvent::Ready { .. }) {
+                        let c = s2
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .and_then(std::sync::Weak::upgrade);
+                        if let Some(c) = c {
+                            c.stop();
+                            let _ = dtx.lock().unwrap().send(c.pid());
+                        }
                     }
-                }
-            })
+                },
+            )
             .unwrap(),
         );
         *slot.lock().unwrap() = Some(Arc::downgrade(&client));
         let pid = client.pid().unwrap();
         std::fs::write(dir.join("go"), b"").unwrap();
-        assert_eq!(drx.recv_timeout(W), Ok(None), "stop() from inside on_event returned, helper released");
+        assert_eq!(
+            drx.recv_timeout(W),
+            Ok(None),
+            "stop() from inside on_event returned, helper released"
+        );
         assert!(pid_gone(pid));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -547,7 +633,11 @@ mod tests {
         let pid = f.client.pid().unwrap();
         f.client.stop();
         assert!(f.client.restart().is_ok());
-        assert_eq!(f.client.pid(), None, "restart after stop must not spawn a helper");
+        assert_eq!(
+            f.client.pid(),
+            None,
+            "restart after stop must not spawn a helper"
+        );
         assert!(pid_gone(pid));
     }
 

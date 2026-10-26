@@ -83,7 +83,10 @@ fn echo() {
 
 /// `{"t":"_exit","code":N}` -> N.
 fn exit_code(line: &str) -> Option<i32> {
-    line.strip_prefix(r#"{"t":"_exit","code":"#)?.trim_end_matches('}').parse().ok()
+    line.strip_prefix(r#"{"t":"_exit","code":"#)?
+        .trim_end_matches('}')
+        .parse()
+        .ok()
 }
 
 fn frames(name: &str, slots: &str, cap: &str) {
@@ -98,10 +101,17 @@ fn frames(name: &str, slots: &str, cap: &str) {
         std::process::exit(0);
     });
     let mut out = std::io::stdout().lock();
-    writeln!(out, r#"{{"t":"shm","name":"{name}","slots":{slots},"cap":{cap}}}"#).unwrap();
+    writeln!(
+        out,
+        r#"{{"t":"shm","name":"{name}","slots":{slots},"cap":{cap}}}"#
+    )
+    .unwrap();
     loop {
         for (slot, seq) in [(0, 2), (1, 4), (2, 6)] {
-            if writeln!(out, r#"{{"t":"frame","slot":{slot},"seq":{seq}}}"#).and_then(|_| out.flush()).is_err() {
+            if writeln!(out, r#"{{"t":"frame","slot":{slot},"seq":{seq}}}"#)
+                .and_then(|_| out.flush())
+                .is_err()
+            {
                 std::process::exit(0);
             }
             std::thread::sleep(Duration::from_millis(16));
@@ -116,7 +126,11 @@ fn hid(dir: PathBuf) {
     let mut out = std::io::stdout().lock();
     writeln!(out, r#"{{"t":"ready","w":393,"h":852}}"#).unwrap();
     out.flush().unwrap();
-    let mut log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("log")).unwrap();
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("log"))
+        .unwrap();
     let mut displaced = false;
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { return };
@@ -131,7 +145,9 @@ fn hid(dir: PathBuf) {
             std::process::exit(code);
         }
         let start = line.contains(r#""p":"down""#)
-            || [r#""t":"button""#, r#""t":"key""#, r#""t":"text""#].iter().any(|t| line.contains(t));
+            || [r#""t":"button""#, r#""t":"key""#, r#""t":"text""#]
+                .iter()
+                .any(|t| line.contains(t));
         if displaced && start {
             displaced = false;
             writeln!(out, r#"{{"t":"reclaimed"}}"#).unwrap();
@@ -156,7 +172,11 @@ fn ax(mode: Option<&str>) {
         if mode == Some("hang") || !line.contains(r#""t":"snapshot""#) {
             continue;
         }
-        let id = line.split(r#""id":"#).nth(1).and_then(|r| r.trim_end_matches('}').parse::<u64>().ok()).unwrap_or(0);
+        let id = line
+            .split(r#""id":"#)
+            .nth(1)
+            .and_then(|r| r.trim_end_matches('}').parse::<u64>().ok())
+            .unwrap_or(0);
         writeln!(
             out,
             r#"{{"t":"ax","id":{id},"ms":1.0,"requests":4,"root":{{"role":"AXApplication","label":"Fake","enabled":true,"frame":[0,0,393,852],"children":[{{"role":"AXButton","label":"Continue","id":"go","enabled":true,"frame":[20,700,353,50]}}]}}}}"#

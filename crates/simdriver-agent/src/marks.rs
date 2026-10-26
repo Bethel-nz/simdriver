@@ -25,7 +25,12 @@ const INTERACTIVE: &[&str] = &[
 ];
 
 /// Roles that take typed text (`fill`).
-const TEXT_INPUT: &[&str] = &["AXSearchField", "AXSecureTextField", "AXTextArea", "AXTextField"];
+const TEXT_INPUT: &[&str] = &[
+    "AXSearchField",
+    "AXSecureTextField",
+    "AXTextArea",
+    "AXTextField",
+];
 
 /// Samples across an element when its centre is covered (columns × rows).
 const SAMPLES: (u32, u32) = (7, 5);
@@ -71,16 +76,24 @@ impl Element {
 
     /// The largest change of any frame edge, in points.
     pub(crate) fn moved_by(&self, other: &Element) -> f64 {
-        (0..4).map(|i| (self.frame[i] - other.frame[i]).abs()).fold(0.0, f64::max)
+        (0..4)
+            .map(|i| (self.frame[i] - other.frame[i]).abs())
+            .fold(0.0, f64::max)
     }
 
     /// What an agent calls it: the label, else the value, else the identifier.
     pub fn name(&self) -> &str {
-        self.label.as_deref().or(self.value.as_deref()).or(self.identifier.as_deref()).unwrap_or("")
+        self.label
+            .as_deref()
+            .or(self.value.as_deref())
+            .or(self.identifier.as_deref())
+            .unwrap_or("")
     }
 
     pub(crate) fn takes_text(&self) -> bool {
-        TEXT_INPUT.iter().any(|r| r[2..].eq_ignore_ascii_case(&self.role))
+        TEXT_INPUT
+            .iter()
+            .any(|r| r[2..].eq_ignore_ascii_case(&self.role))
     }
 }
 
@@ -102,7 +115,10 @@ pub fn elements(root: &AxNode, screen: (f64, f64)) -> (Vec<Element>, usize) {
     let interactive: Vec<usize> = (0..flat.len())
         .filter(|&i| {
             let n = flat[i].0;
-            n.enabled && INTERACTIVE.contains(&n.role.as_str()) && n.frame[2] > 0.0 && n.frame[3] > 0.0
+            n.enabled
+                && INTERACTIVE.contains(&n.role.as_str())
+                && n.frame[2] > 0.0
+                && n.frame[3] > 0.0
         })
         .collect();
 
@@ -114,15 +130,22 @@ pub fn elements(root: &AxNode, screen: (f64, f64)) -> (Vec<Element>, usize) {
             offscreen += 1;
             continue;
         };
-        let covers: Vec<[f64; 4]> =
-            interactive[k + 1..].iter().filter(|&&j| j >= end).map(|&j| flat[j].0.frame).collect();
+        let covers: Vec<[f64; 4]> = interactive[k + 1..]
+            .iter()
+            .filter(|&&j| j >= end)
+            .map(|&j| flat[j].0.frame)
+            .collect();
         let free = |p: [f64; 2]| !covers.iter().any(|c| inside(p, *c));
         let centre = [visible[0] + visible[2] / 2.0, visible[1] + visible[3] / 2.0];
         let samples = samples(visible);
         let free_count = samples.iter().filter(|p| free(**p)).count();
         let whole = visible == n.frame;
         let (tap, visibility) = if free(centre) {
-            let v = if whole && free_count == samples.len() { Visibility::Visible } else { Visibility::Partial };
+            let v = if whole && free_count == samples.len() {
+                Visibility::Visible
+            } else {
+                Visibility::Partial
+            };
             (Some(centre), v)
         } else {
             let nearest = samples
@@ -137,7 +160,11 @@ pub fn elements(root: &AxNode, screen: (f64, f64)) -> (Vec<Element>, usize) {
         };
         out.push(Element {
             reference: format!("e{}", out.len() + 1),
-            role: n.role.strip_prefix("AX").unwrap_or(&n.role).to_ascii_lowercase(),
+            role: n
+                .role
+                .strip_prefix("AX")
+                .unwrap_or(&n.role)
+                .to_ascii_lowercase(),
             label: n.label.clone(),
             value: n.value.clone(),
             placeholder: n.placeholder.clone(),
@@ -152,7 +179,10 @@ pub fn elements(root: &AxNode, screen: (f64, f64)) -> (Vec<Element>, usize) {
 
 /// Every label and value in the tree (for `waitFor`).
 pub(crate) fn texts(root: &AxNode) -> impl Iterator<Item = &str> {
-    root.descendants().into_iter().flat_map(|n| [n.label.as_deref(), n.value.as_deref()]).flatten()
+    root.descendants()
+        .into_iter()
+        .flat_map(|n| [n.label.as_deref(), n.value.as_deref()])
+        .flatten()
 }
 
 fn clip(f: [f64; 4], (w, h): (f64, f64)) -> Option<[f64; 4]> {
@@ -215,11 +245,19 @@ pub(crate) mod tests {
                     [0.0, 0.0, 400.0, 800.0],
                     vec![
                         node("AXButton", "General", [16.0, 200.0, 368.0, 50.0], vec![]),
-                        node("AXButton", "Screen Time", [16.0, 700.0, 368.0, 50.0], vec![]),
+                        node(
+                            "AXButton",
+                            "Screen Time",
+                            [16.0, 700.0, 368.0, 50.0],
+                            vec![],
+                        ),
                         node("AXButton", "Passcode", [16.0, 750.0, 368.0, 50.0], vec![]),
                         node("AXButton", "Privacy", [16.0, 790.0, 368.0, 50.0], vec![]),
                         node("AXButton", "Wallet", [16.0, 900.0, 368.0, 50.0], vec![]),
-                        AxNode { enabled: false, ..node("AXButton", "Disabled", [16.0, 300.0, 368.0, 50.0], vec![]) },
+                        AxNode {
+                            enabled: false,
+                            ..node("AXButton", "Disabled", [16.0, 300.0, 368.0, 50.0], vec![])
+                        },
                     ],
                 ),
                 node("AXTextField", "Search", [8.0, 725.0, 384.0, 75.0], vec![]),
@@ -230,10 +268,19 @@ pub(crate) mod tests {
     #[test]
     fn numbers_visible_interactive_elements_in_tree_order() {
         let (els, off) = elements(&settings(), (400.0, 800.0));
-        let names: Vec<(&str, &str)> = els.iter().map(|e| (e.reference.as_str(), e.name())).collect();
+        let names: Vec<(&str, &str)> = els
+            .iter()
+            .map(|e| (e.reference.as_str(), e.name()))
+            .collect();
         assert_eq!(
             names,
-            [("e1", "General"), ("e2", "Screen Time"), ("e3", "Passcode"), ("e4", "Privacy"), ("e5", "Search")]
+            [
+                ("e1", "General"),
+                ("e2", "Screen Time"),
+                ("e3", "Passcode"),
+                ("e4", "Privacy"),
+                ("e5", "Search")
+            ]
         );
         assert_eq!(off, 1, "Wallet is wholly off screen");
         assert_eq!(els[0].role, "button");
@@ -271,6 +318,10 @@ pub(crate) mod tests {
         );
         let root = node("AXApplication", "", [0.0, 0.0, 100.0, 100.0], vec![cell]);
         let (els, _) = elements(&root, (100.0, 100.0));
-        assert_eq!(els[0].visibility, Visibility::Visible, "the cell is not covered by its own button");
+        assert_eq!(
+            els[0].visibility,
+            Visibility::Visible,
+            "the cell is not covered by its own button"
+        );
     }
 }

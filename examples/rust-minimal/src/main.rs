@@ -36,7 +36,9 @@ struct App {
 impl App {
     /// Window pixels → 0..1 of the device screen (the window is the frame's size).
     fn norm(&self, (x, y): (f64, f64)) -> (f64, f64) {
-        let Some(w) = self.window.as_ref() else { return (0.5, 0.5) };
+        let Some(w) = self.window.as_ref() else {
+            return (0.5, 0.5);
+        };
         let s = w.inner_size();
         (x / s.width.max(1) as f64, y / s.height.max(1) as f64) // not clamped: the core clamps
     }
@@ -51,10 +53,16 @@ impl App {
     }
 
     fn paint(&mut self) {
-        let (Some(window), Some(surface)) = (self.window.as_ref(), self.surface.as_mut()) else { return };
-        let Some(frame) = self.latest.lock().unwrap().take() else { return };
+        let (Some(window), Some(surface)) = (self.window.as_ref(), self.surface.as_mut()) else {
+            return;
+        };
+        let Some(frame) = self.latest.lock().unwrap().take() else {
+            return;
+        };
         let (w, h) = (frame.width, frame.height);
-        let (Some(nw), Some(nh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) else { return };
+        let (Some(nw), Some(nh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) else {
+            return;
+        };
         if self.frame_size != (w, h) {
             self.frame_size = (w, h);
             let _ = window.request_inner_size(PhysicalSize::new(w, h));
@@ -62,7 +70,12 @@ impl App {
         if surface.resize(nw, nh).is_err() {
             return;
         }
-        let Ok(mut buf) = surface.buffer_mut() else { return };
+        let Ok(mut buf) = surface.buffer_mut() else {
+            return;
+        };
+        // as_chunks gives [u8; 4] slices without per-iteration bounds checks.
+        #[allow(clippy::chunks_exact_to_as_chunks)]
+        // as_chunks needs a newer MSRV than this example targets
         for (out, px) in buf.iter_mut().zip(frame.data.chunks_exact(4)) {
             *out = u32::from_le_bytes([px[0], px[1], px[2], px[3]]) & 0x00FF_FFFF;
         }
@@ -75,10 +88,13 @@ impl ApplicationHandler<NewFrame> for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("simdriver").with_resizable(false);
+        let attrs = Window::default_attributes()
+            .with_title("simdriver")
+            .with_resizable(false);
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
-        self.surface = Some(softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface"));
+        self.surface =
+            Some(softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface"));
         self.window = Some(window);
     }
 
@@ -95,7 +111,12 @@ impl ApplicationHandler<NewFrame> for App {
             let s = self.driver.stats();
             println!(
                 "fps {:.1} (active {:.1}, idle {:.1}) · frames {} · last response {:?} ms · {:?}",
-                s.fps, s.active_fps, s.idle_fps, s.frames, s.last_response_ms, self.driver.state()
+                s.fps,
+                s.active_fps,
+                s.idle_fps,
+                s.frames,
+                s.last_response_ms,
+                self.driver.state()
             );
         }
         if self.deadline.is_some_and(|d| now >= d) {
@@ -117,14 +138,26 @@ impl ApplicationHandler<NewFrame> for App {
                     self.driver.pointer(Phase::Move, x, y, self.mods());
                 }
             }
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
                 self.mouse_down = state.is_pressed();
                 let (x, y) = self.norm(self.cursor);
-                let phase = if self.mouse_down { Phase::Down } else { Phase::Up };
+                let phase = if self.mouse_down {
+                    Phase::Down
+                } else {
+                    Phase::Up
+                };
                 self.driver.pointer(phase, x, y, self.mods());
             }
             // Trackpad only: a notched wheel (LineDelta) has no phases to lift on.
-            WindowEvent::MouseWheel { delta: MouseScrollDelta::PixelDelta(d), phase, .. } => {
+            WindowEvent::MouseWheel {
+                delta: MouseScrollDelta::PixelDelta(d),
+                phase,
+                ..
+            } => {
                 let phase = match phase {
                     TouchPhase::Started => ScrollPhase::Began,
                     TouchPhase::Moved => ScrollPhase::Changed,
@@ -164,7 +197,9 @@ fn main() {
         }
     }
 
-    let event_loop = EventLoop::<NewFrame>::with_user_event().build().expect("event loop");
+    let event_loop = EventLoop::<NewFrame>::with_user_event()
+        .build()
+        .expect("event loop");
     let proxy: EventLoopProxy<NewFrame> = event_loop.create_proxy();
     let latest: Arc<Mutex<Option<Frame>>> = Arc::new(Mutex::new(None));
     let parked = latest.clone();

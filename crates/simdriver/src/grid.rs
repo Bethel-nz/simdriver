@@ -22,7 +22,11 @@ impl Grid {
     pub fn new(screen_pt: (f64, f64), cols: u32) -> Grid {
         let cols = cols.max(1);
         let (w, h) = screen_pt;
-        let rows = if w > 0.0 && h > 0.0 { (h / (w / f64::from(cols))).round().max(1.0) as u32 } else { 1 };
+        let rows = if w > 0.0 && h > 0.0 {
+            (h / (w / f64::from(cols))).round().max(1.0) as u32
+        } else {
+            1
+        };
         Grid { rows, cols }
     }
 

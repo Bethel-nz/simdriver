@@ -74,10 +74,10 @@ impl StatsTracker {
 
     pub(crate) fn on_frame(&mut self, now: Duration) {
         self.frames += 1;
-        if let Some(prev) = self.last_frame {
-            if self.moved_since_frame {
-                self.max_gap = self.max_gap.max(now.saturating_sub(prev));
-            }
+        if let Some(prev) = self.last_frame
+            && self.moved_since_frame
+        {
+            self.max_gap = self.max_gap.max(now.saturating_sub(prev));
         }
         self.last_frame = Some(now);
         self.moved_since_frame = false;
@@ -97,15 +97,18 @@ impl StatsTracker {
                 match self.spans.last_mut() {
                     Some(s) if s.end.is_some_and(|e| now <= e) => s.end = None,
                     Some(s) if s.end.is_none() => {}
-                    _ => self.spans.push(Span { start: now, end: None }),
+                    _ => self.spans.push(Span {
+                        start: now,
+                        end: None,
+                    }),
                 }
             }
             Phase::Move => self.moved_since_frame = true,
             Phase::Up => {
-                if let Some(s) = self.spans.last_mut() {
-                    if s.end.is_none() {
-                        s.end = Some(now + ACTIVE_TAIL);
-                    }
+                if let Some(s) = self.spans.last_mut()
+                    && s.end.is_none()
+                {
+                    s.end = Some(now + ACTIVE_TAIL);
                 }
             }
         }

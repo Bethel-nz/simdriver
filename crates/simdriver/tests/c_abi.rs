@@ -12,7 +12,12 @@ fn workspace_target_debug() -> PathBuf {
     if let Ok(t) = std::env::var("CARGO_TARGET_DIR") {
         return PathBuf::from(t).join("debug");
     }
-    crate_dir().ancestors().nth(2).unwrap().join("target").join("debug")
+    crate_dir()
+        .ancestors()
+        .nth(2)
+        .unwrap()
+        .join("target")
+        .join("debug")
 }
 
 fn generate_to(path: &Path) {
@@ -62,7 +67,11 @@ fn c_smoke() {
     let out = debug.join(format!("c_smoke-{}", std::process::id()));
     let cc = Command::new("clang")
         .args([
-            crate_dir().join("tests/c/smoke.c").as_os_str().to_string_lossy().as_ref(),
+            crate_dir()
+                .join("tests/c/smoke.c")
+                .as_os_str()
+                .to_string_lossy()
+                .as_ref(),
             "-I",
             crate_dir().join("include").to_str().unwrap(),
             "-L",

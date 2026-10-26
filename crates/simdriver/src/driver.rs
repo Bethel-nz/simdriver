@@ -90,7 +90,12 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { device: DeviceSelector::FirstBootedOrIphone, fps: 60, scale: 2, helper_dir: None }
+        Options {
+            device: DeviceSelector::FirstBootedOrIphone,
+            fps: 60,
+            scale: 2,
+            helper_dir: None,
+        }
     }
 }
 
@@ -162,9 +167,24 @@ pub enum Event {
 
 /// Raw host input, kept until the screen size is known (sdhid's first `ready`).
 enum Raw {
-    Pointer { phase: Phase, x: f64, y: f64, pinch: bool, pan: bool },
-    Scroll { phase: ScrollPhase, x: f64, y: f64, dx: f64, dy: f64 },
-    TwoFinger { phase: Phase, f: [f64; 4] },
+    Pointer {
+        phase: Phase,
+        x: f64,
+        y: f64,
+        pinch: bool,
+        pan: bool,
+    },
+    Scroll {
+        phase: ScrollPhase,
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
+    },
+    TwoFinger {
+        phase: Phase,
+        f: [f64; 4],
+    },
     Cmd(HidCmd),
 }
 
@@ -172,9 +192,16 @@ impl Raw {
     fn is_move(&self) -> bool {
         matches!(
             self,
-            Raw::Pointer { phase: Phase::Move, .. }
-                | Raw::Scroll { phase: ScrollPhase::Changed, .. }
-                | Raw::TwoFinger { phase: Phase::Move, .. }
+            Raw::Pointer {
+                phase: Phase::Move,
+                ..
+            } | Raw::Scroll {
+                phase: ScrollPhase::Changed,
+                ..
+            } | Raw::TwoFinger {
+                phase: Phase::Move,
+                ..
+            }
         )
     }
 }
@@ -206,7 +233,11 @@ impl Input {
 enum Msg {
     Hid(HidEvent),
     /// sdframe process `gen` exited.
-    FrameExit { generation: u64, code: Option<i32>, last: Option<String> },
+    FrameExit {
+        generation: u64,
+        code: Option<i32>,
+        last: Option<String>,
+    },
     /// First frame since sdframe was (re)spawned.
     FrameUp,
     Note(String),
@@ -331,7 +362,9 @@ impl Inner {
     /// Spawn a fresh sdframe feeding the (long-lived) pipeline. No-op once stopped.
     fn spawn_frame(&self) -> Result<(), Error> {
         let mut f = lock(&self.frame);
-        let Some(p) = f.pipeline.as_ref() else { return Ok(()) };
+        let Some(p) = f.pipeline.as_ref() else {
+            return Ok(());
+        };
         let (sink, stderr_sink) = (p.sink(), p.stderr_sink());
         f.generation += 1;
         let generation = f.generation;
@@ -343,7 +376,11 @@ impl Inner {
             sink,
             stderr_sink,
             move |code, last| {
-                let _ = tx.send(Msg::FrameExit { generation, code, last });
+                let _ = tx.send(Msg::FrameExit {
+                    generation,
+                    code,
+                    last,
+                });
             },
         )?;
         let old = f.helper.replace(helper);
@@ -361,10 +398,18 @@ impl Inner {
 
     /// Route one input through the gesture router (screen known) and send the result.
     fn apply(&self, inp: &mut Input, raw: Raw) {
-        let (Some((w, h)), Some(r)) = (inp.screen, inp.router.as_mut()) else { return };
+        let (Some((w, h)), Some(r)) = (inp.screen, inp.router.as_mut()) else {
+            return;
+        };
         let now = self.shared.epoch.elapsed();
         let cmds = match raw {
-            Raw::Pointer { phase, x, y, pinch, pan } => {
+            Raw::Pointer {
+                phase,
+                x,
+                y,
+                pinch,
+                pan,
+            } => {
                 let (x, y) = (x * w, y * h);
                 match phase {
                     Phase::Down => r.down(x, y, pinch, pan, now),
@@ -372,8 +417,16 @@ impl Inner {
                     Phase::Up => r.up(x, y, now),
                 }
             }
-            Raw::Scroll { phase, x, y, dx, dy } => r.scroll(x * w, y * h, dx * w, dy * h, phase, now),
-            Raw::TwoFinger { phase, f } => r.two_finger(phase, [f[0] * w, f[1] * h, f[2] * w, f[3] * h]),
+            Raw::Scroll {
+                phase,
+                x,
+                y,
+                dx,
+                dy,
+            } => r.scroll(x * w, y * h, dx * w, dy * h, phase, now),
+            Raw::TwoFinger { phase, f } => {
+                r.two_finger(phase, [f[0] * w, f[1] * h, f[2] * w, f[3] * h])
+            }
             Raw::Cmd(c) => vec![c],
         };
         for c in cmds {
@@ -458,10 +511,10 @@ impl Inner {
         self.shared.gate.close();
         self.ax.stop();
         let _ = self.shared.tx.send(Msg::Stop);
-        if let Some(h) = lock(&self.supervisor).take() {
-            if h.thread().id() != thread::current().id() {
-                let _ = h.join();
-            }
+        if let Some(h) = lock(&self.supervisor).take()
+            && h.thread().id() != thread::current().id()
+        {
+            let _ = h.join();
         }
         self.hid.stop();
         let (helper, pipeline) = {
@@ -490,7 +543,9 @@ fn is_fatal_hid(code: Option<i32>) -> bool {
 }
 
 fn exit_text(name: &str, code: Option<i32>, why: &Option<String>) -> String {
-    let how = code.map_or("was killed by a signal".to_string(), |c| format!("exited with code {c}"));
+    let how = code.map_or("was killed by a signal".to_string(), |c| {
+        format!("exited with code {c}")
+    });
     match why {
         Some(w) => format!("{name} {how}: {w}"),
         None => format!("{name} {how}"),
@@ -516,7 +571,10 @@ impl Supervisor {
     fn run(mut self) {
         let mut next_tick = Instant::now() + TICK;
         while !self.inner.stopping.load(Ordering::SeqCst) {
-            let wake = [Some(next_tick), self.frame_retry, self.hid_retry].into_iter().flatten().min();
+            let wake = [Some(next_tick), self.frame_retry, self.hid_retry]
+                .into_iter()
+                .flatten()
+                .min();
             let wait = wake.map_or(TICK, |t| t.saturating_duration_since(Instant::now()));
             match self.rx.recv_timeout(wait) {
                 Ok(Msg::Stop) | Err(RecvTimeoutError::Disconnected) => return,
@@ -534,7 +592,9 @@ impl Supervisor {
             if self.frame_retry.is_some_and(|t| now >= t) {
                 self.frame_retry = None;
                 if let Err(e) = self.inner.spawn_frame() {
-                    self.inner.shared.note(format!("sdframe restart failed: {e}"));
+                    self.inner
+                        .shared
+                        .note(format!("sdframe restart failed: {e}"));
                     self.frame_retry = Some(self.backoff(true));
                 }
             }
@@ -550,7 +610,11 @@ impl Supervisor {
 
     /// When to retry, doubling that helper's backoff for the next time.
     fn backoff(&mut self, frame: bool) -> Instant {
-        let b = if frame { &mut self.frame_backoff } else { &mut self.hid_backoff };
+        let b = if frame {
+            &mut self.frame_backoff
+        } else {
+            &mut self.hid_backoff
+        };
         let at = Instant::now() + *b;
         *b = (*b * 2).min(BACKOFF_MAX);
         at
@@ -566,12 +630,20 @@ impl Supervisor {
                 self.frame_backoff = BACKOFF_MIN;
                 self.update();
             }
-            Msg::FrameExit { generation, code, last } => {
+            Msg::FrameExit {
+                generation,
+                code,
+                last,
+            } => {
                 if generation != lock(&self.inner.frame).generation {
                     return;
                 }
                 let text = exit_text("sdframe", code, &last);
-                if is_fatal(code) && self.inner.startup_fail(Error::Spawn(last.unwrap_or_else(|| text.clone()))) {
+                if is_fatal(code)
+                    && self
+                        .inner
+                        .startup_fail(Error::Spawn(last.unwrap_or_else(|| text.clone())))
+                {
                     return;
                 }
                 shared.note(text);
@@ -611,7 +683,11 @@ impl Supervisor {
                     }
                     let why = self.last_hid_error.take().or(last_stderr);
                     let text = exit_text("sdhid", code, &why);
-                    if is_fatal_hid(code) && self.inner.startup_fail(Error::Spawn(why.unwrap_or_else(|| text.clone()))) {
+                    if is_fatal_hid(code)
+                        && self
+                            .inner
+                            .startup_fail(Error::Spawn(why.unwrap_or_else(|| text.clone())))
+                    {
                         return;
                     }
                     shared.note(text);
@@ -629,7 +705,11 @@ impl Supervisor {
         let s = if self.framed && self.hid_ready {
             self.restarting = false;
             self.inner.startup_ok(); // `start` returns once frames and input are both up
-            if self.displaced { State::InputDisplaced } else { State::Live }
+            if self.displaced {
+                State::InputDisplaced
+            } else {
+                State::Live
+            }
         } else if self.restarting {
             State::Restarting
         } else {
@@ -658,7 +738,10 @@ impl Driver {
     /// a helper cannot find the device or its screen (exit 3/4) or sdhid cannot reach the
     /// digitizer (exit 1, e.g. an unsupported Xcode). Events go to `on_event` from
     /// internal threads, possibly concurrently.
-    pub fn start(opts: Options, on_event: impl Fn(Event) + Send + Sync + 'static) -> Result<Driver, Error> {
+    pub fn start(
+        opts: Options,
+        on_event: impl Fn(Event) + Send + Sync + 'static,
+    ) -> Result<Driver, Error> {
         let device = opts.device.resolve(&list_devices()?)?;
         if device.state != "Booted" {
             return Err(Error::NotBooted(device.udid));
@@ -727,9 +810,12 @@ impl Driver {
         };
         let pipeline = {
             let (f, n) = (shared.clone(), shared.clone());
-            FramePipeline::new(move |fr| f.on_frame(fr), move |note| {
-                let _ = n.tx.send(Msg::Note(note));
-            })
+            FramePipeline::new(
+                move |fr| f.on_frame(fr),
+                move |note| {
+                    let _ = n.tx.send(Msg::Note(note));
+                },
+            )
         };
         let inner = Arc::new(Inner {
             ax: Ax::new(hid_bin.with_file_name("sdax"), vec![udid.clone()]),
@@ -737,7 +823,11 @@ impl Driver {
             shared,
             hid,
             input: Mutex::new(Input::default()),
-            frame: Mutex::new(FrameSide { pipeline: Some(pipeline), helper: None, generation: 0 }),
+            frame: Mutex::new(FrameSide {
+                pipeline: Some(pipeline),
+                helper: None,
+                generation: 0,
+            }),
             frame_bin: frame.0,
             frame_args: frame.1,
             startup: Mutex::new(Startup::default()),
@@ -747,7 +837,9 @@ impl Driver {
             stopped_cv: Condvar::new(),
             supervisor: Mutex::new(None),
         });
-        let driver = Driver { inner: inner.clone() };
+        let driver = Driver {
+            inner: inner.clone(),
+        };
         // From here on, dropping `driver` on an error path stops everything.
         driver.inner.spawn_frame()?;
         let sup = Supervisor {
@@ -780,20 +872,35 @@ impl Driver {
     /// Pointer at (`x`, `y`), normalized 0..1 inside the box (outside clamps to the screen
     /// edge). `mods` matter on `Down`: Alt = pinch, Alt+Shift = two-finger pan.
     pub fn pointer(&self, phase: Phase, x: f64, y: f64, mods: Modifiers) {
-        self.inner.input(Raw::Pointer { phase, x, y, pinch: mods.alt, pan: mods.alt && mods.shift });
+        self.inner.input(Raw::Pointer {
+            phase,
+            x,
+            y,
+            pinch: mods.alt,
+            pan: mods.alt && mods.shift,
+        });
     }
 
     /// Trackpad scroll as a one-finger pan at (`x`, `y`) (0..1); `dx`, `dy` are fractions
     /// of the box.
     pub fn scroll(&self, phase: ScrollPhase, x: f64, y: f64, dx: f64, dy: f64) {
-        self.inner.input(Raw::Scroll { phase, x, y, dx, dy });
+        self.inner.input(Raw::Scroll {
+            phase,
+            x,
+            y,
+            dx,
+            dy,
+        });
     }
 
     /// Two fingers at (`x1`, `y1`) and (`x2`, `y2`), normalized 0..1 inside the box,
     /// placed exactly as given: rotation, an off-centre pinch, scripted multi-touch.
     /// `Down` first lifts any other touch in progress; send `Move`s, then `Up`.
     pub fn touch2(&self, phase: Phase, x1: f64, y1: f64, x2: f64, y2: f64) {
-        self.inner.input(Raw::TwoFinger { phase, f: [x1, y1, x2, y2] });
+        self.inner.input(Raw::TwoFinger {
+            phase,
+            f: [x1, y1, x2, y2],
+        });
     }
 
     /// The device screen in points (e.g. 402×874 for an iPhone 18 Pro), known once
@@ -837,11 +944,15 @@ impl Driver {
     /// first (so iOS treats it as a drag, not a scroll), move over `duration`, then
     /// lift. Sleeps on the calling thread.
     pub fn drag(&self, x1: f64, y1: f64, x2: f64, y2: f64, hold: Duration, duration: Duration) {
-        self.drag_with_holds((x1, y1), (x2, y2), DragTiming {
-            source_hold: hold,
-            movement: duration,
-            destination_hold: Duration::ZERO,
-        });
+        self.drag_with_holds(
+            (x1, y1),
+            (x2, y2),
+            DragTiming {
+                source_hold: hold,
+                movement: duration,
+                destination_hold: Duration::ZERO,
+            },
+        );
     }
 
     /// Drag with optional pauses at the source and destination.
@@ -854,7 +965,12 @@ impl Driver {
         for i in 1..=steps {
             thread::sleep(timing.movement / steps);
             let t = f64::from(i) / f64::from(steps);
-            self.pointer(Phase::Move, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, Modifiers::default());
+            self.pointer(
+                Phase::Move,
+                x1 + (x2 - x1) * t,
+                y1 + (y2 - y1) * t,
+                Modifiers::default(),
+            );
         }
         thread::sleep(timing.destination_hold);
         self.pointer(Phase::Up, x2, y2, Modifiers::default());
@@ -882,7 +998,9 @@ impl Driver {
             let parts: Vec<&str> = name.split('+').collect();
             return self.key_combo(&parts);
         }
-        let Some(code) = key_code(name) else { return false };
+        let Some(code) = key_code(name) else {
+            return false;
+        };
         self.inner.input(Raw::Cmd(HidCmd::Key { code }));
         true
     }
@@ -890,7 +1008,9 @@ impl Driver {
     /// Press the final key while holding cmd, shift, alt, or ctrl modifiers.
     /// Example: `key_combo(&["cmd", "a"])` sends Command+A.
     pub fn key_combo(&self, keys: &[&str]) -> bool {
-        if keys.len() < 2 { return false; }
+        if keys.len() < 2 {
+            return false;
+        }
         let mut mods = Vec::with_capacity(keys.len() - 1);
         for modifier in &keys[..keys.len() - 1] {
             let code = match modifier.to_ascii_lowercase().as_str() {
@@ -900,9 +1020,13 @@ impl Driver {
                 "ctrl" | "control" => 224,
                 _ => return false,
             };
-            if !mods.contains(&code) { mods.push(code); }
+            if !mods.contains(&code) {
+                mods.push(code);
+            }
         }
-        let Some(code) = key_code(keys[keys.len() - 1]) else { return false };
+        let Some(code) = key_code(keys[keys.len() - 1]) else {
+            return false;
+        };
         self.inner.input(Raw::Cmd(HidCmd::KeyCombo { code, mods }));
         true
     }
@@ -915,8 +1039,13 @@ impl Driver {
             }
         } else {
             match crate::devices::clipboard_write(&self.inner.udid, s) {
-                Ok(()) => { self.key_combo(&["cmd", "v"]); }
-                Err(e) => self.inner.shared.note(format!("non-ASCII paste failed: {e}")),
+                Ok(()) => {
+                    self.key_combo(&["cmd", "v"]);
+                }
+                Err(e) => self
+                    .inner
+                    .shared
+                    .note(format!("non-ASCII paste failed: {e}")),
             }
         }
     }
@@ -1012,7 +1141,11 @@ impl Driver {
 
     /// Press `b` `presses` times (2 = double press), holding each `hold_secs` (0 = a tap).
     pub fn button(&self, b: Button, presses: u32, hold_secs: f32) {
-        self.inner.input(Raw::Cmd(HidCmd::Button { name: b.wire(), presses, hold_secs }));
+        self.inner.input(Raw::Cmd(HidCmd::Button {
+            name: b.wire(),
+            presses,
+            hold_secs,
+        }));
     }
 
     /// The current state (the last one delivered as an event).
@@ -1078,7 +1211,10 @@ mod tests {
     #[test]
     fn options_default() {
         let o = Options::default();
-        assert_eq!((o.device, o.fps, o.scale, o.helper_dir), (DeviceSelector::FirstBootedOrIphone, 60, 2, None));
+        assert_eq!(
+            (o.device, o.fps, o.scale, o.helper_dir),
+            (DeviceSelector::FirstBootedOrIphone, 60, 2, None)
+        );
     }
 
     /// Everything a driver reported, in order.
@@ -1094,11 +1230,22 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter_map(|e| if let Event::State(s) = e { Some(*s) } else { None })
+                .filter_map(|e| {
+                    if let Event::State(s) = e {
+                        Some(*s)
+                    } else {
+                        None
+                    }
+                })
                 .collect()
         }
         fn frames(&self) -> usize {
-            self.0.lock().unwrap().iter().filter(|e| matches!(e, Event::Frame(_))).count()
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| matches!(e, Event::Frame(_)))
+                .count()
         }
         fn len(&self) -> usize {
             self.0.lock().unwrap().len()
@@ -1110,7 +1257,11 @@ mod tests {
         fn wait_state(&self, want: State, n: usize) {
             let t0 = Instant::now();
             while self.states().iter().filter(|s| **s == want).count() < n {
-                assert!(t0.elapsed() < W, "waiting for {want:?} #{n}; states {:?}", self.states());
+                assert!(
+                    t0.elapsed() < W,
+                    "waiting for {want:?} #{n}; states {:?}",
+                    self.states()
+                );
                 thread::sleep(Duration::from_millis(5));
             }
         }
@@ -1132,7 +1283,8 @@ mod tests {
 
     impl Rig {
         fn new(tag: &str, hid_ready: bool) -> Rig {
-            let dir = std::env::temp_dir().join(format!("simdriver-drv-{}-{tag}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("simdriver-drv-{}-{tag}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             if hid_ready {
@@ -1140,13 +1292,29 @@ mod tests {
             }
             let name = format!("/sdd-{}-{tag}", std::process::id());
             let shm = ShmWriter::create(&name, 3, 16).unwrap();
-            let h = FrameHeader { width: 2, height: 2, source_width: 4, source_height: 4 };
+            let h = FrameHeader {
+                width: 2,
+                height: 2,
+                source_width: 4,
+                source_height: 4,
+            };
             for (slot, seq) in [(0, 2), (1, 4), (2, 6)] {
                 shm.write(slot, seq, &h, &[seq as u8; 16]);
             }
-            let frame = (fake_helper(), vec!["frames".into(), name, "3".into(), "16".into()]);
-            let hid = (fake_helper(), vec!["hid".into(), dir.to_string_lossy().into_owned()]);
-            Rig { dir, _shm: shm, frame, hid }
+            let frame = (
+                fake_helper(),
+                vec!["frames".into(), name, "3".into(), "16".into()],
+            );
+            let hid = (
+                fake_helper(),
+                vec!["hid".into(), dir.to_string_lossy().into_owned()],
+            );
+            Rig {
+                dir,
+                _shm: shm,
+                frame,
+                hid,
+            }
         }
 
         fn start(&self, udid: &str, log: &Log) -> Result<Driver, Error> {
@@ -1155,11 +1323,21 @@ mod tests {
 
         fn start_within(&self, udid: &str, log: &Log, wait: Duration) -> Result<Driver, Error> {
             let l = log.clone();
-            Driver::start_with(udid.into(), self.frame.clone(), self.hid.clone(), Box::new(move |e| l.push(e)), wait)
+            Driver::start_with(
+                udid.into(),
+                self.frame.clone(),
+                self.hid.clone(),
+                Box::new(move |e| l.push(e)),
+                wait,
+            )
         }
 
         fn hid_log(&self) -> Vec<String> {
-            std::fs::read_to_string(self.dir.join("log")).unwrap_or_default().lines().map(String::from).collect()
+            std::fs::read_to_string(self.dir.join("log"))
+                .unwrap_or_default()
+                .lines()
+                .map(String::from)
+                .collect()
         }
 
         fn wait_hid_log(&self, n: usize) -> Vec<String> {
@@ -1169,7 +1347,11 @@ mod tests {
                 if l.len() >= n {
                     return l;
                 }
-                assert!(t0.elapsed() < W, "hid log has {} of {n} lines: {l:?}", l.len());
+                assert!(
+                    t0.elapsed() < W,
+                    "hid log has {} of {n} lines: {l:?}",
+                    l.len()
+                );
                 thread::sleep(Duration::from_millis(5));
             }
         }
@@ -1212,7 +1394,9 @@ mod tests {
         let rig = Rig::new("early", false);
         let log = Log::default();
         // sdhid never gets ready here, so `start` returns after its bounded wait.
-        let d = rig.start_within("fake-early", &log, Duration::from_millis(300)).unwrap();
+        let d = rig
+            .start_within("fake-early", &log, Duration::from_millis(300))
+            .unwrap();
         assert_eq!(d.state(), State::Starting, "sdhid is not ready yet");
         d.pointer(Phase::Down, 0.5, 0.25, Modifiers::default());
         d.pointer(Phase::Move, 0.6, 0.25, Modifiers::default());
@@ -1224,11 +1408,22 @@ mod tests {
         d.button(Button::Home, 2, 0.0);
         d.text("hi");
         thread::sleep(Duration::from_millis(100));
-        assert!(rig.hid_log().is_empty(), "nothing reaches sdhid before ready");
+        assert!(
+            rig.hid_log().is_empty(),
+            "nothing reaches sdhid before ready"
+        );
         std::fs::write(rig.dir.join("go"), b"").unwrap();
         log.wait_state(State::Live, 1);
         let got = rig.wait_hid_log(8);
-        let touch = |p, x: f64, y: f64| HidCmd::Touch { phase: p, x, y, edge: crate::protocol::Edge::None }.to_line();
+        let touch = |p, x: f64, y: f64| {
+            HidCmd::Touch {
+                phase: p,
+                x,
+                y,
+                edge: crate::protocol::Edge::None,
+            }
+            .to_line()
+        };
         assert_eq!(
             got,
             vec![
@@ -1236,18 +1431,46 @@ mod tests {
                 touch(Phase::Move, 393.0 * 0.6, 213.0),
                 touch(Phase::Up, 393.0, 0.0),
                 HidCmd::Key { code: 40 }.to_line(),
-                HidCmd::KeyCombo { code: 4, mods: vec![227] }.to_line(),
-                HidCmd::KeyCombo { code: 4, mods: vec![225] }.to_line(),
-                HidCmd::Button { name: "HOME", presses: 2, hold_secs: 0.0 }.to_line(),
+                HidCmd::KeyCombo {
+                    code: 4,
+                    mods: vec![227]
+                }
+                .to_line(),
+                HidCmd::KeyCombo {
+                    code: 4,
+                    mods: vec![225]
+                }
+                .to_line(),
+                HidCmd::Button {
+                    name: "HOME",
+                    presses: 2,
+                    hold_secs: 0.0
+                }
+                .to_line(),
                 HidCmd::Text("hi".into()).to_line(),
             ]
         );
         // Once ready, input goes straight through.
-        d.pointer(Phase::Down, 0.5, 0.5, Modifiers { alt: true, ..Modifiers::default() });
+        d.pointer(
+            Phase::Down,
+            0.5,
+            0.5,
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+        );
         let got = rig.wait_hid_log(9);
         assert_eq!(
             got[8],
-            HidCmd::Touch2 { phase: Phase::Down, x1: 146.5, y1: 426.0, x2: 246.5, y2: 426.0 }.to_line()
+            HidCmd::Touch2 {
+                phase: Phase::Down,
+                x1: 146.5,
+                y1: 426.0,
+                x2: 246.5,
+                y2: 426.0
+            }
+            .to_line()
         );
     }
 
@@ -1259,7 +1482,11 @@ mod tests {
         log.wait_state(State::Live, 1);
 
         let old = d.__helper_pids();
-        lock(&d.inner.frame).helper.as_ref().unwrap().send_line(r#"{"t":"_exit","code":7}"#);
+        lock(&d.inner.frame)
+            .helper
+            .as_ref()
+            .unwrap()
+            .send_line(r#"{"t":"_exit","code":7}"#);
         log.wait_state(State::Restarting, 1);
         log.wait_state(State::Live, 2);
         let now = d.__helper_pids();
@@ -1294,25 +1521,52 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|e| if let Event::Note(n) = e { Some(n.clone()) } else { None })
+            .filter_map(|e| {
+                if let Event::Note(n) = e {
+                    Some(n.clone())
+                } else {
+                    None
+                }
+            })
             .collect();
-        assert!(notes.iter().any(|n| n == "sdframe exited with code 7: fake_helper: exiting 7"), "{notes:?}");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n == "sdframe exited with code 7: fake_helper: exiting 7"),
+            "{notes:?}"
+        );
     }
 
     #[test]
     fn exit_3_or_4_before_first_frame_fails_start() {
         let rig = Rig::new("fail", true);
         let log = Log::default();
-        let frame = (fake_helper(), vec!["fail".into(), "3".into(), "device X not found".into()]);
+        let frame = (
+            fake_helper(),
+            vec!["fail".into(), "3".into(), "device X not found".into()],
+        );
         let l = log.clone();
-        let r = Driver::start_with("fake-fail".into(), frame, rig.hid.clone(), Box::new(move |e| l.push(e)), W);
-        assert!(matches!(&r, Err(Error::Spawn(m)) if m == "device X not found"), "{:?}", r.err());
+        let r = Driver::start_with(
+            "fake-fail".into(),
+            frame,
+            rig.hid.clone(),
+            Box::new(move |e| l.push(e)),
+            W,
+        );
+        assert!(
+            matches!(&r, Err(Error::Spawn(m)) if m == "device X not found"),
+            "{:?}",
+            r.err()
+        );
         assert_eq!(log.states(), vec![State::Starting, State::Stopped]);
 
         // sdhid failing before ready (sdframe silent: the `echo` fake never frames).
         let rig = Rig::new("hidfail", false);
         let log = Log::default();
-        let hid = (fake_helper(), vec!["fail".into(), "4".into(), "no main screen".into()]);
+        let hid = (
+            fake_helper(),
+            vec!["fail".into(), "4".into(), "no main screen".into()],
+        );
         let l = log.clone();
         let r = Driver::start_with(
             "fake-hidfail".into(),
@@ -1321,7 +1575,11 @@ mod tests {
             Box::new(move |e| l.push(e)),
             W,
         );
-        assert!(matches!(&r, Err(Error::Spawn(m)) if m == "no main screen"), "{:?}", r.err());
+        assert!(
+            matches!(&r, Err(Error::Spawn(m)) if m == "no main screen"),
+            "{:?}",
+            r.err()
+        );
         assert_eq!(log.states(), vec![State::Starting, State::Stopped]);
         drop(rig);
 
@@ -1330,10 +1588,28 @@ mod tests {
         let rig = Rig::new("hidfail1", false);
         let log = Log::default();
         // sdhid fails 300 ms in, well after the fake sdframe's first frame.
-        let hid = (fake_helper(), vec!["fail".into(), "1".into(), "dtuhidd did not come up".into(), "300".into()]);
+        let hid = (
+            fake_helper(),
+            vec![
+                "fail".into(),
+                "1".into(),
+                "dtuhidd did not come up".into(),
+                "300".into(),
+            ],
+        );
         let l = log.clone();
-        let r = Driver::start_with("fake-hidfail1".into(), rig.frame.clone(), hid, Box::new(move |e| l.push(e)), W);
-        assert!(matches!(&r, Err(Error::Spawn(m)) if m == "dtuhidd did not come up"), "{:?}", r.err());
+        let r = Driver::start_with(
+            "fake-hidfail1".into(),
+            rig.frame.clone(),
+            hid,
+            Box::new(move |e| l.push(e)),
+            W,
+        );
+        assert!(
+            matches!(&r, Err(Error::Spawn(m)) if m == "dtuhidd did not come up"),
+            "{:?}",
+            r.err()
+        );
         assert_eq!(log.states(), vec![State::Starting, State::Stopped]);
         assert!(log.frames() > 0, "frames were streaming when sdhid failed");
         drop(rig);
@@ -1341,10 +1617,19 @@ mod tests {
         // Any other early exit is a restart, not a failure.
         let rig = Rig::new("fail1", true);
         let log = Log::default();
-        let frame = (fake_helper(), vec!["fail".into(), "1".into(), "transient".into()]);
+        let frame = (
+            fake_helper(),
+            vec!["fail".into(), "1".into(), "transient".into()],
+        );
         let l = log.clone();
         let short = Duration::from_millis(300);
-        let r = Driver::start_with("fake-fail1".into(), frame, rig.hid.clone(), Box::new(move |e| l.push(e)), short);
+        let r = Driver::start_with(
+            "fake-fail1".into(),
+            frame,
+            rig.hid.clone(),
+            Box::new(move |e| l.push(e)),
+            short,
+        );
         let d = r.expect("exit 1 is not fatal");
         log.wait_state(State::Restarting, 1);
         d.stop();
@@ -1360,7 +1645,16 @@ mod tests {
         d.touch2(Phase::Down, 0.25, 0.5, 0.75, 0.5);
         d.touch2(Phase::Move, 0.5, 0.25, 0.5, 0.75); // a quarter turn
         d.touch2(Phase::Up, 0.5, 0.25, 0.5, 0.75);
-        let t2 = |phase, x1, y1, x2, y2| HidCmd::Touch2 { phase, x1, y1, x2, y2 }.to_line();
+        let t2 = |phase, x1, y1, x2, y2| {
+            HidCmd::Touch2 {
+                phase,
+                x1,
+                y1,
+                x2,
+                y2,
+            }
+            .to_line()
+        };
         assert_eq!(
             rig.wait_hid_log(3),
             vec![
@@ -1379,7 +1673,15 @@ mod tests {
         log.wait_state(State::Live, 1);
         d.long_press(0.25, 0.5, Duration::ZERO);
         d.drag(0.25, 0.5, 0.75, 0.5, Duration::ZERO, Duration::ZERO);
-        let touch = |phase, x, y| HidCmd::Touch { phase, x, y, edge: crate::protocol::Edge::None }.to_line();
+        let touch = |phase, x, y| {
+            HidCmd::Touch {
+                phase,
+                x,
+                y,
+                edge: crate::protocol::Edge::None,
+            }
+            .to_line()
+        };
         let got = rig.wait_hid_log(6);
         assert_eq!(got[0], touch(Phase::Down, 98.25, 426.0));
         assert_eq!(got[1], touch(Phase::Up, 98.25, 426.0));
@@ -1396,10 +1698,23 @@ mod tests {
         let d = rig.start("fake-double-tap", &log).unwrap();
         log.wait_state(State::Live, 1);
         d.double_tap(0.25, 0.5);
-        let touch = |phase| HidCmd::Touch { phase, x: 98.25, y: 426.0, edge: crate::protocol::Edge::None }.to_line();
+        let touch = |phase| {
+            HidCmd::Touch {
+                phase,
+                x: 98.25,
+                y: 426.0,
+                edge: crate::protocol::Edge::None,
+            }
+            .to_line()
+        };
         assert_eq!(
             rig.wait_hid_log(4),
-            vec![touch(Phase::Down), touch(Phase::Up), touch(Phase::Down), touch(Phase::Up)]
+            vec![
+                touch(Phase::Down),
+                touch(Phase::Up),
+                touch(Phase::Down),
+                touch(Phase::Up)
+            ]
         );
     }
 
@@ -1413,15 +1728,29 @@ mod tests {
                 .map(|l| {
                     let (frame, hid, l) = (rig.frame.clone(), rig.hid.clone(), l.clone());
                     s.spawn(move || {
-                        Driver::start_with("fake-concurrent".into(), frame, hid, Box::new(move |e| l.push(e)), W)
-                            .unwrap()
+                        Driver::start_with(
+                            "fake-concurrent".into(),
+                            frame,
+                            hid,
+                            Box::new(move |e| l.push(e)),
+                            W,
+                        )
+                        .unwrap()
                     })
                 })
                 .collect();
             hs.into_iter().map(|h| h.join().unwrap()).collect()
         });
-        let live: Vec<_> = drivers.iter().filter(|d| d.state() == State::Live).collect();
-        assert_eq!(live.len(), 1, "{:?}", drivers.iter().map(|d| d.state()).collect::<Vec<_>>());
+        let live: Vec<_> = drivers
+            .iter()
+            .filter(|d| d.state() == State::Live)
+            .collect();
+        assert_eq!(
+            live.len(),
+            1,
+            "{:?}",
+            drivers.iter().map(|d| d.state()).collect::<Vec<_>>()
+        );
         for d in drivers.iter().filter(|d| d.state() != State::Live) {
             assert_eq!(d.state(), State::Stopped);
         }
@@ -1447,11 +1776,23 @@ mod tests {
         d.pointer(Phase::Up, 0.6, 0.5, Modifiers::default());
         d.pointer(Phase::Down, 0.25, 0.25, Modifiers::default());
         d.pointer(Phase::Up, 0.25, 0.25, Modifiers::default());
-        let touch = |p, x: f64, y: f64| HidCmd::Touch { phase: p, x, y, edge: crate::protocol::Edge::None }.to_line();
+        let touch = |p, x: f64, y: f64| {
+            HidCmd::Touch {
+                phase: p,
+                x,
+                y,
+                edge: crate::protocol::Edge::None,
+            }
+            .to_line()
+        };
         let got = rig.wait_hid_log(3);
         assert_eq!(
             got,
-            vec![touch(Phase::Down, 196.5, 426.0), touch(Phase::Down, 98.25, 213.0), touch(Phase::Up, 98.25, 213.0)]
+            vec![
+                touch(Phase::Down, 196.5, 426.0),
+                touch(Phase::Down, 98.25, 213.0),
+                touch(Phase::Up, 98.25, 213.0)
+            ]
         );
     }
 
@@ -1464,12 +1805,30 @@ mod tests {
         // The real sdax would sit next to the fake sdhid; point it at the fake one.
         d.inner.ax.set_helper(fake_helper(), vec!["ax".into()]);
         let root = d.accessibility().unwrap();
-        let button = root.descendants().into_iter().find(|n| n.role == "AXButton").unwrap();
+        let button = root
+            .descendants()
+            .into_iter()
+            .find(|n| n.role == "AXButton")
+            .unwrap();
         let (sw, sh) = d.screen_points().unwrap();
         let (cx, cy) = button.center();
         d.tap(cx / sw, cy / sh);
-        let touch = |p, x: f64, y: f64| HidCmd::Touch { phase: p, x, y, edge: crate::protocol::Edge::None }.to_line();
-        assert_eq!(rig.wait_hid_log(2), vec![touch(Phase::Down, 196.5, 725.0), touch(Phase::Up, 196.5, 725.0)]);
+        let touch = |p, x: f64, y: f64| {
+            HidCmd::Touch {
+                phase: p,
+                x,
+                y,
+                edge: crate::protocol::Edge::None,
+            }
+            .to_line()
+        };
+        assert_eq!(
+            rig.wait_hid_log(2),
+            vec![
+                touch(Phase::Down, 196.5, 725.0),
+                touch(Phase::Up, 196.5, 725.0)
+            ]
+        );
         let g = d.grid(Grid::DEFAULT_COLS).unwrap();
         assert_eq!(g, Grid { rows: 13, cols: 6 });
         let f = d.capture(W).expect("capture");
@@ -1528,7 +1887,9 @@ mod tests {
         );
         let pids = d.__helper_pids();
         *slot.lock().unwrap() = Some(Arc::downgrade(&d));
-        done_rx.recv_timeout(W).expect("stop() from inside on_event returned");
+        done_rx
+            .recv_timeout(W)
+            .expect("stop() from inside on_event returned");
         d.stop(); // waits for the stop in progress
         assert_eq!(d.state(), State::Stopped);
         assert!(gone(&pids));
@@ -1544,11 +1905,11 @@ mod tests {
             rig.frame.clone(),
             rig.hid.clone(),
             Box::new(move |e| {
-                if matches!(e, Event::Frame(_)) {
-                    if let Some(d) = s2.lock().unwrap().take() {
-                        drop(d);
-                        let _ = done_tx.lock().unwrap().send(());
-                    }
+                if matches!(e, Event::Frame(_))
+                    && let Some(d) = s2.lock().unwrap().take()
+                {
+                    drop(d);
+                    let _ = done_tx.lock().unwrap().send(());
                 }
             }),
             W,
@@ -1556,10 +1917,15 @@ mod tests {
         .unwrap();
         let pids = d.__helper_pids();
         *slot.lock().unwrap() = Some(d);
-        done_rx.recv_timeout(W).expect("drop from inside on_event returned");
+        done_rx
+            .recv_timeout(W)
+            .expect("drop from inside on_event returned");
         let t0 = Instant::now();
         while !gone(&pids) {
-            assert!(t0.elapsed() < W, "helpers survived a drop from inside on_event");
+            assert!(
+                t0.elapsed() < W,
+                "helpers survived a drop from inside on_event"
+            );
             thread::sleep(Duration::from_millis(5));
         }
     }

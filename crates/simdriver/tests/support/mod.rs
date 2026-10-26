@@ -18,10 +18,10 @@ pub fn booted_udid() -> Option<String> {
         eprintln!("skipping: set SIMDRIVER_IT=1 to run simulator integration tests");
         return None;
     }
-    if let Ok(udid) = std::env::var("SIMDRIVER_TEST_UDID") {
-        if !udid.is_empty() {
-            return Some(udid);
-        }
+    if let Ok(udid) = std::env::var("SIMDRIVER_TEST_UDID")
+        && !udid.is_empty()
+    {
+        return Some(udid);
     }
     let out = Command::new("xcrun")
         .args(["simctl", "list", "devices", "booted", "-j"])
@@ -32,10 +32,10 @@ pub fn booted_udid() -> Option<String> {
     let devices = v["devices"].as_object().expect("devices map");
     for list in devices.values() {
         for d in list.as_array().into_iter().flatten() {
-            if d["state"] == "Booted" {
-                if let Some(udid) = d["udid"].as_str() {
-                    return Some(udid.to_string());
-                }
+            if d["state"] == "Booted"
+                && let Some(udid) = d["udid"].as_str()
+            {
+                return Some(udid.to_string());
             }
         }
     }
@@ -46,15 +46,22 @@ pub fn booted_udid() -> Option<String> {
 /// a simulator someone is using. Its helpers are `simframe <udid> …` / `simhid <udid>`.
 pub fn input_allowed(udid: &str) -> bool {
     let pattern = format!("/(simframe|simhid) {udid}");
-    let busy = Command::new("pgrep").args(["-f", &pattern]).output().is_ok_and(|o| o.status.success());
+    let busy = Command::new("pgrep")
+        .args(["-f", &pattern])
+        .output()
+        .is_ok_and(|o| o.status.success());
     if busy {
-        eprintln!("skipping: pip-mini is live on {udid} (no scripted input); use SIMDRIVER_TEST_UDID");
+        eprintln!(
+            "skipping: pip-mini is live on {udid} (no scripted input); use SIMDRIVER_TEST_UDID"
+        );
     }
     !busy
 }
 
 pub fn fixture_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
 }
 
 /// A tiny HTTP server serving one fixture on a free localhost port. Stops on drop.
@@ -129,12 +136,16 @@ pub fn open_page(udid: &str, fixture: &str) -> Server {
     static COLD_ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     let cold = COLD_ONCE.set(()).is_ok();
     if cold {
-        let _ =
-            Command::new("xcrun").args(["simctl", "terminate", udid, "com.apple.mobilesafari"]).status();
+        let _ = Command::new("xcrun")
+            .args(["simctl", "terminate", udid, "com.apple.mobilesafari"])
+            .status();
         std::thread::sleep(Duration::from_millis(300));
     }
     let opened = |args: &Vec<String>| {
-        Command::new("xcrun").args(args).status().is_ok_and(|st| st.success())
+        Command::new("xcrun")
+            .args(args)
+            .status()
+            .is_ok_and(|st| st.success())
     };
     let launch_with_url = || {
         opened(&vec![
@@ -152,12 +163,21 @@ pub fn open_page(udid: &str, fixture: &str) -> Server {
         launch_with_url()
     } else {
         // Warm: re-opening the stable-port URL reuses its tab.
-        opened(&vec!["simctl".into(), "openurl".into(), udid.into(), url.clone()]) || launch_with_url()
+        opened(&vec![
+            "simctl".into(),
+            "openurl".into(),
+            udid.into(),
+            url.clone(),
+        ]) || launch_with_url()
         // (launch is also the fallback when openurl's LaunchServices channel has wedged
         // for good after enough reboots — ETIMEDOUT forever — which launch is immune to.)
     };
     assert!(st, "could not open {url} on {udid}");
-    Server { port, stop, thread: Some(thread) }
+    Server {
+        port,
+        stop,
+        thread: Some(thread),
+    }
 }
 
 /// Delivery statistics for frames that arrived during a measurement window.
@@ -184,7 +204,11 @@ impl FrameStats {
     /// Times outside the window are ignored.
     pub fn over_window(times: &[Instant], start: Instant, end: Instant) -> FrameStats {
         assert!(end > start, "empty measurement window");
-        let inside: Vec<Instant> = times.iter().copied().filter(|t| *t >= start && *t <= end).collect();
+        let inside: Vec<Instant> = times
+            .iter()
+            .copied()
+            .filter(|t| *t >= start && *t <= end)
+            .collect();
         // A frame sitting exactly on a window edge is that edge (no zero-length gap).
         let mut edges = Vec::with_capacity(inside.len() + 2);
         if inside.first() != Some(&start) {
@@ -194,8 +218,10 @@ impl FrameStats {
         if inside.last() != Some(&end) {
             edges.push(end);
         }
-        let mut gaps: Vec<f64> =
-            edges.windows(2).map(|w| w[1].duration_since(w[0]).as_secs_f64() * 1000.0).collect();
+        let mut gaps: Vec<f64> = edges
+            .windows(2)
+            .map(|w| w[1].duration_since(w[0]).as_secs_f64() * 1000.0)
+            .collect();
         gaps.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let pct = |p: f64| gaps[(((gaps.len() - 1) as f64) * p).round() as usize];
         FrameStats {
@@ -229,13 +255,21 @@ impl FrameStats {
     /// at most 1% of gaps over 34 ms, and no single gap over 100 ms.
     pub fn assert_live_60(&self) {
         assert!(self.fps >= 55.0, "fps {:.1} < 55 ({self:?})", self.fps);
-        assert!(self.p99_gap_ms <= SLOW_GAP_MS, "p99 gap {:.1} ms > 34 ({self:?})", self.p99_gap_ms);
+        assert!(
+            self.p99_gap_ms <= SLOW_GAP_MS,
+            "p99 gap {:.1} ms > 34 ({self:?})",
+            self.p99_gap_ms
+        );
         assert!(
             self.slow_gaps * 100 <= self.gaps,
             "{} of {} gaps > 34 ms (> 1%) ({self:?})",
             self.slow_gaps,
             self.gaps
         );
-        assert!(self.max_gap_ms <= 100.0, "max gap {:.1} ms > 100 ({self:?})", self.max_gap_ms);
+        assert!(
+            self.max_gap_ms <= 100.0,
+            "max gap {:.1} ms > 100 ({self:?})",
+            self.max_gap_ms
+        );
     }
 }

@@ -70,7 +70,10 @@ impl Drop for GateGuard<'_> {
 
 impl CallbackGate {
     pub(crate) fn new() -> CallbackGate {
-        CallbackGate { st: Mutex::new(GateState::default()), cv: Condvar::new() }
+        CallbackGate {
+            st: Mutex::new(GateState::default()),
+            cv: Condvar::new(),
+        }
     }
 
     /// Run `f` unless the gate is closed. Returns whether it ran.
@@ -169,7 +172,10 @@ impl Supervised {
         if !bin.is_file() {
             return Err(Error::HelperMissing(bin));
         }
-        let name = bin.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = bin
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let mut child = Command::new(&bin)
             .args(&args)
             .stdin(Stdio::piped())
@@ -186,7 +192,10 @@ impl Supervised {
         unsafe {
             libc::fcntl(stdin.as_raw_fd(), libc::F_SETNOSIGPIPE, 1);
         }
-        let proc_ = Arc::new(Mutex::new(Proc { child, status: None }));
+        let proc_ = Arc::new(Mutex::new(Proc {
+            child,
+            status: None,
+        }));
         let last_stderr = Arc::new(Mutex::new(None));
 
         let (err_done_tx, err_done_rx) = mpsc::channel::<()>();
@@ -251,7 +260,13 @@ impl Supervised {
             })
             .map_err(|e| Error::Spawn(format!("stdout thread: {e}")))?;
 
-        Ok(Supervised { pid, proc_, stdin: Mutex::new(Some(stdin)), last_stderr, stopped: AtomicBool::new(false) })
+        Ok(Supervised {
+            pid,
+            proc_,
+            stdin: Mutex::new(Some(stdin)),
+            last_stderr,
+            stopped: AtomicBool::new(false),
+        })
     }
 
     pub fn pid(&self) -> u32 {
@@ -262,7 +277,9 @@ impl Supervised {
     /// closed or the helper is gone.
     pub fn send_line(&self, line: &str) -> bool {
         let mut guard = lock(&self.stdin);
-        let Some(w) = guard.as_mut() else { return false };
+        let Some(w) = guard.as_mut() else {
+            return false;
+        };
         let mut buf = Vec::with_capacity(line.len() + 1);
         buf.extend_from_slice(line.as_bytes());
         buf.push(b'\n');
@@ -330,7 +347,10 @@ pub(crate) fn fake_helper() -> PathBuf {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
         let exe = std::env::current_exe().expect("current_exe");
-        let profile_dir = exe.parent().and_then(Path::parent).expect("target/<profile>/deps/<test>");
+        let profile_dir = exe
+            .parent()
+            .and_then(Path::parent)
+            .expect("target/<profile>/deps/<test>");
         let bin = profile_dir.join("examples").join("fake_helper");
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_helper.rs");
         let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
@@ -341,9 +361,18 @@ pub(crate) fn fake_helper() -> PathBuf {
         {
             return bin;
         }
-        let target = profile_dir.parent().expect("target dir").join("fake-helper");
+        let target = profile_dir
+            .parent()
+            .expect("target dir")
+            .join("fake-helper");
         let st = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--quiet", "--example", "fake_helper", "--manifest-path"])
+            .args([
+                "build",
+                "--quiet",
+                "--example",
+                "fake_helper",
+                "--manifest-path",
+            ])
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
             .arg("--target-dir")
             .arg(&target)
@@ -374,7 +403,13 @@ mod tests {
     }
 
     /// Spawn the fake with channels for its lines and its exit code.
-    fn spawn_fake(a: &[&str]) -> (Supervised, mpsc::Receiver<String>, mpsc::Receiver<Option<i32>>) {
+    fn spawn_fake(
+        a: &[&str],
+    ) -> (
+        Supervised,
+        mpsc::Receiver<String>,
+        mpsc::Receiver<Option<i32>>,
+    ) {
         let (ltx, lrx) = mpsc::channel();
         let (etx, erx) = mpsc::channel();
         let s = Supervised::spawn(
@@ -408,16 +443,36 @@ mod tests {
     fn helper_dir_precedence() {
         let baked = crate::baked_helper_dir().to_path_buf();
         assert_eq!(resolve_helper_dir(None, None), baked);
-        assert_eq!(resolve_helper_dir(None, Some("".into())), baked, "empty env is unset");
-        assert_eq!(resolve_helper_dir(None, Some("/env".into())), PathBuf::from("/env"));
-        assert_eq!(resolve_helper_dir(Some(Path::new("/opt")), Some("/env".into())), PathBuf::from("/opt"));
-        assert_eq!(resolve_helper_dir(Some(Path::new("/opt")), None), PathBuf::from("/opt"));
+        assert_eq!(
+            resolve_helper_dir(None, Some("".into())),
+            baked,
+            "empty env is unset"
+        );
+        assert_eq!(
+            resolve_helper_dir(None, Some("/env".into())),
+            PathBuf::from("/env")
+        );
+        assert_eq!(
+            resolve_helper_dir(Some(Path::new("/opt")), Some("/env".into())),
+            PathBuf::from("/opt")
+        );
+        assert_eq!(
+            resolve_helper_dir(Some(Path::new("/opt")), None),
+            PathBuf::from("/opt")
+        );
     }
 
     #[test]
     fn missing_binary_is_helper_missing() {
-        let r = Supervised::spawn(PathBuf::from("/nonexistent/sdframe"), vec![], |_| {}, |_| {});
-        assert!(matches!(r, Err(Error::HelperMissing(p)) if p == Path::new("/nonexistent/sdframe")));
+        let r = Supervised::spawn(
+            PathBuf::from("/nonexistent/sdframe"),
+            vec![],
+            |_| {},
+            |_| {},
+        );
+        assert!(
+            matches!(r, Err(Error::HelperMissing(p)) if p == Path::new("/nonexistent/sdframe"))
+        );
     }
 
     #[test]
@@ -426,7 +481,10 @@ mod tests {
         assert_eq!(lines.recv_timeout(W).unwrap(), "a");
         assert_eq!(lines.recv_timeout(W).unwrap(), "b c");
         assert_eq!(exit.recv_timeout(W).unwrap(), Some(7));
-        assert!(exit.recv_timeout(Duration::from_millis(200)).is_err(), "on_exit fires once");
+        assert!(
+            exit.recv_timeout(Duration::from_millis(200)).is_err(),
+            "on_exit fires once"
+        );
     }
 
     #[test]
@@ -442,7 +500,10 @@ mod tests {
         let pid = s.pid();
         s.close_stdin();
         assert_eq!(exit.recv_timeout(W).unwrap(), Some(0));
-        assert!(wait_gone(pid, W).is_some(), "fake still around after stdin EOF");
+        assert!(
+            wait_gone(pid, W).is_some(),
+            "fake still around after stdin EOF"
+        );
         s.send_line("after close is a no-op");
     }
 
@@ -454,10 +515,17 @@ mod tests {
         let t0 = Instant::now();
         s.stop();
         let took = t0.elapsed();
-        assert!(took >= Duration::from_millis(250), "SIGKILL only after 250 ms (took {took:?})");
+        assert!(
+            took >= Duration::from_millis(250),
+            "SIGKILL only after 250 ms (took {took:?})"
+        );
         assert!(took < Duration::from_secs(2), "stop took {took:?}");
         assert!(pid_gone(pid), "stubborn survived stop");
-        assert_eq!(exit.recv_timeout(W).unwrap(), None, "killed by a signal: no exit code");
+        assert_eq!(
+            exit.recv_timeout(W).unwrap(),
+            None,
+            "killed by a signal: no exit code"
+        );
         s.stop(); // idempotent
     }
 
@@ -468,8 +536,15 @@ mod tests {
         let t0 = Instant::now();
         drop(s);
         assert!(pid_gone(pid), "fake survived drop");
-        assert!(t0.elapsed() < Duration::from_millis(250), "drop took {:?}", t0.elapsed());
-        assert!(exit.recv_timeout(W).is_ok(), "on_exit still fires after drop");
+        assert!(
+            t0.elapsed() < Duration::from_millis(250),
+            "drop took {:?}",
+            t0.elapsed()
+        );
+        assert!(
+            exit.recv_timeout(W).is_ok(),
+            "on_exit still fires after drop"
+        );
     }
 
     #[test]
@@ -508,7 +583,10 @@ mod tests {
         });
         in_rx.recv_timeout(W).unwrap();
         gate.close();
-        assert!(done.load(Ordering::SeqCst), "close returned while a callback was running");
+        assert!(
+            done.load(Ordering::SeqCst),
+            "close returned while a callback was running"
+        );
         assert!(t.join().unwrap());
         assert!(!gate.run(|| panic!("ran after close")));
         // Closing from inside a callback does not wait for itself.
@@ -525,6 +603,9 @@ mod tests {
     fn last_stderr_is_kept() {
         let (s, _lines, exit) = spawn_fake(&["nope"]);
         assert_eq!(exit.recv_timeout(W).unwrap(), Some(2));
-        assert_eq!(s.last_stderr().as_deref(), Some(r#"fake_helper: unknown mode Some("nope")"#));
+        assert_eq!(
+            s.last_stderr().as_deref(),
+            Some(r#"fake_helper: unknown mode Some("nope")"#)
+        );
     }
 }

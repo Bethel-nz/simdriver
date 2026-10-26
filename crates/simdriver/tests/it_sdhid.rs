@@ -6,7 +6,9 @@
 //! the full history instead of hanging.
 mod support;
 
-use simdriver::__internal::{Edge, FrameMsg, HidCmd, HidMsg, Phase, ShmReader, parse_frame_line, parse_hid_line};
+use simdriver::__internal::{
+    Edge, FrameMsg, HidCmd, HidMsg, Phase, ShmReader, parse_frame_line, parse_hid_line,
+};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -53,7 +55,13 @@ impl Hid {
                 }
             }
         });
-        Hid { name, child, stdin, rx, seen: Vec::new() }
+        Hid {
+            name,
+            child,
+            stdin,
+            rx,
+            seen: Vec::new(),
+        }
     }
 
     fn send(&mut self, cmd: HidCmd) {
@@ -99,14 +107,24 @@ impl Hid {
     /// Require that no non-warning message arrives for `quiet`.
     fn expect_silence(&mut self, quiet: Duration, what: &str) {
         let got = self.next(quiet);
-        assert!(got.is_none(), "{}: {what}: unexpected {got:?}; history: {:?}", self.name, self.seen);
+        assert!(
+            got.is_none(),
+            "{}: {what}: unexpected {got:?}; history: {:?}",
+            self.name,
+            self.seen
+        );
     }
 }
 
 const READY_WAIT: Duration = Duration::from_secs(30);
 
 fn touch(phase: Phase, x: f64, y: f64) -> HidCmd {
-    HidCmd::Touch { phase, x, y, edge: Edge::None }
+    HidCmd::Touch {
+        phase,
+        x,
+        y,
+        edge: Edge::None,
+    }
 }
 
 /// sdframe, reduced to "how bright is the centre pixel right now".
@@ -141,10 +159,13 @@ impl Frames {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
                 match parse_frame_line(&line) {
                     Some(FrameMsg::Shm { name, slots, cap }) => {
-                        reader = Some(ShmReader::open(&name, slots, cap).expect("open announced shm"));
+                        reader =
+                            Some(ShmReader::open(&name, slots, cap).expect("open announced shm"));
                     }
                     Some(FrameMsg::Frame { slot, seq }) => {
-                        let Some(f) = reader.as_ref().and_then(|r| r.read(slot, seq)) else { continue };
+                        let Some(f) = reader.as_ref().and_then(|r| r.read(slot, seq)) else {
+                            continue;
+                        };
                         let o = ((f.height / 2 * f.width + f.width / 2) * 4) as usize;
                         let px = &f.data[o..o + 3]; // BGR
                         let lum = ((px[0] as u32 + px[1] as u32 + px[2] as u32) / 3) as u8;
@@ -165,10 +186,10 @@ impl Frames {
     fn wait(&self, within: Duration, pred: impl Fn(u8) -> bool) -> Result<Duration, Option<u8>> {
         let start = Instant::now();
         loop {
-            if let Some(l) = self.lum() {
-                if pred(l) {
-                    return Ok(start.elapsed());
-                }
+            if let Some(l) = self.lum()
+                && pred(l)
+            {
+                return Ok(start.elapsed());
             }
             if start.elapsed() >= within {
                 return Err(self.lum());
@@ -187,7 +208,9 @@ fn is_white(l: u8) -> bool {
 
 #[test]
 fn it_sdhid_steps_aside_and_reclaims() {
-    let Some(udid) = support::booted_udid() else { return };
+    let Some(udid) = support::booted_udid() else {
+        return;
+    };
     let _server = support::open_page(&udid, "tap.html");
 
     let mut a = Hid::spawn("A", &udid);
@@ -209,8 +232,14 @@ fn it_sdhid_steps_aside_and_reclaims() {
 
     // A non-start command is dropped: no reclaim, nothing on screen.
     a.send(touch(Phase::Move, cx, cy));
-    a.expect_silence(Duration::from_millis(500), "touch move while displaced must not reclaim");
-    assert!(is_black(frames.lum().unwrap()), "dropped move must not touch the screen");
+    a.expect_silence(
+        Duration::from_millis(500),
+        "touch move while displaced must not reclaim",
+    );
+    assert!(
+        is_black(frames.lum().unwrap()),
+        "dropped move must not touch the screen"
+    );
 
     // A gesture start reclaims, then lands.
     let t0 = Instant::now();
@@ -224,7 +253,17 @@ fn it_sdhid_steps_aside_and_reclaims() {
     a.send(touch(Phase::Up, cx, cy));
     let black_in = frames
         .wait(Duration::from_secs(3), is_black)
-        .unwrap_or_else(|last| panic!("touch up never turned the page black (last {last:?}); history: {:?}", a.seen));
-    a.expect_silence(Duration::from_millis(300), "A must stay quiet after reclaiming");
-    eprintln!("reclaimed in {reclaimed_in:?}; white after {white_in:?}; black after up {black_in:?}");
+        .unwrap_or_else(|last| {
+            panic!(
+                "touch up never turned the page black (last {last:?}); history: {:?}",
+                a.seen
+            )
+        });
+    a.expect_silence(
+        Duration::from_millis(300),
+        "A must stay quiet after reclaiming",
+    );
+    eprintln!(
+        "reclaimed in {reclaimed_in:?}; white after {white_in:?}; black after up {black_in:?}"
+    );
 }

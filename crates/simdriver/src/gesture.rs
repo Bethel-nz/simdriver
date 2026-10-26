@@ -99,7 +99,13 @@ fn touch(phase: Phase, x: f64, y: f64, edge: Edge) -> HidCmd {
 
 impl Router {
     pub(crate) fn new(screen_pt: (f64, f64)) -> Router {
-        Router { w: screen_pt.0, h: screen_pt.1, touch: None, pan: None, two: None }
+        Router {
+            w: screen_pt.0,
+            h: screen_pt.1,
+            touch: None,
+            pan: None,
+            two: None,
+        }
     }
 
     fn cx(&self, x: f64) -> f64 {
@@ -138,9 +144,18 @@ impl Router {
     fn pinch_fingers(&self, t: &Touch, x: f64, y: f64) -> [f64; 4] {
         let f = if t.pinch_pan {
             let (dx, dy) = (x - t.x0, y - t.y0);
-            [t.x0 - PINCH_R0_PT + dx, t.y0 + dy, t.x0 + PINCH_R0_PT + dx, t.y0 + dy]
+            [
+                t.x0 - PINCH_R0_PT + dx,
+                t.y0 + dy,
+                t.x0 + PINCH_R0_PT + dx,
+                t.y0 + dy,
+            ]
         } else {
-            let scale = clamp(((t.y0 - y) / PINCH_PT_PER_E).exp(), PINCH_SCALE.0, PINCH_SCALE.1);
+            let scale = clamp(
+                ((t.y0 - y) / PINCH_PT_PER_E).exp(),
+                PINCH_SCALE.0,
+                PINCH_SCALE.1,
+            );
             let r = PINCH_R0_PT * scale;
             [t.x0 - r, t.y0, t.x0 + r, t.y0]
         };
@@ -148,7 +163,13 @@ impl Router {
     }
 
     fn touch2(phase: Phase, f: [f64; 4]) -> HidCmd {
-        HidCmd::Touch2 { phase, x1: f[0], y1: f[1], x2: f[2], y2: f[3] }
+        HidCmd::Touch2 {
+            phase,
+            x1: f[0],
+            y1: f[1],
+            x2: f[2],
+            y2: f[3],
+        }
     }
 
     /// A held edge touch that was not an edge gesture: hand the app everything it
@@ -209,7 +230,14 @@ impl Router {
 
     /// `pinch`: Option held, the drag becomes two fingers; `pan` (Shift too) moves
     /// them together instead of spreading them.
-    pub(crate) fn down(&mut self, x: f64, y: f64, pinch: bool, pan: bool, now: Duration) -> Vec<HidCmd> {
+    pub(crate) fn down(
+        &mut self,
+        x: f64,
+        y: f64,
+        pinch: bool,
+        pan: bool,
+        now: Duration,
+    ) -> Vec<HidCmd> {
         let mut out = Vec::new();
         self.lift_pan(&mut out); // a click ends any trackpad pan in flight
         self.lift_two(&mut out);
@@ -224,7 +252,11 @@ impl Router {
             }
         }
         let (x, y) = (self.cx(x), self.cy(y));
-        let edge = if pinch { Edge::None } else { self.edge_at(x, y) };
+        let edge = if pinch {
+            Edge::None
+        } else {
+            self.edge_at(x, y)
+        };
         let state = if pinch {
             State::Pinch
         } else if edge != Edge::None {
@@ -258,7 +290,9 @@ impl Router {
     pub(crate) fn move_to(&mut self, x: f64, y: f64, _now: Duration) -> Vec<HidCmd> {
         let (x, y) = (self.cx(x), self.cy(y));
         let mut out = Vec::new();
-        let Some(mut t) = self.touch.take() else { return out };
+        let Some(mut t) = self.touch.take() else {
+            return out;
+        };
         t.last = (x, y);
         match t.state {
             State::Stream => out.push(touch(Phase::Move, x, y, Edge::None)),
@@ -291,7 +325,9 @@ impl Router {
     pub(crate) fn up(&mut self, x: f64, y: f64, _now: Duration) -> Vec<HidCmd> {
         let (x, y) = (self.cx(x), self.cy(y));
         let mut out = Vec::new();
-        let Some(mut t) = self.touch.take() else { return out };
+        let Some(mut t) = self.touch.take() else {
+            return out;
+        };
         match t.state {
             State::Pinch => {
                 let f = t.pinch_last.unwrap_or_else(|| self.pinch_fingers(&t, x, y));
@@ -336,7 +372,11 @@ impl Router {
                     // Natural scrolling: content follows the fingers, and so does the finger.
                     let nx = clamp(p.x + dx, 0.0, self.w);
                     let ny = clamp(p.y + dy, 0.0, self.h);
-                    self.pan = Some(Pan { x: nx, y: ny, last: now });
+                    self.pan = Some(Pan {
+                        x: nx,
+                        y: ny,
+                        last: now,
+                    });
                     out.push(touch(Phase::Move, nx, ny, Edge::None));
                 }
             }
@@ -349,7 +389,11 @@ impl Router {
     /// Lift a pan finger if `Ended` never arrived. The driver calls this every ~50 ms.
     pub(crate) fn tick(&mut self, now: Duration) -> Vec<HidCmd> {
         let mut out = Vec::new();
-        if self.pan.as_ref().is_some_and(|p| now.saturating_sub(p.last) >= PAN_IDLE_LIFT) {
+        if self
+            .pan
+            .as_ref()
+            .is_some_and(|p| now.saturating_sub(p.last) >= PAN_IDLE_LIFT)
+        {
             self.lift_pan(&mut out);
         }
         out
@@ -369,7 +413,13 @@ mod tests {
         HidCmd::Touch { phase, x, y, edge }
     }
     fn t2(phase: Phase, x1: f64, y1: f64, x2: f64, y2: f64) -> HidCmd {
-        HidCmd::Touch2 { phase, x1, y1, x2, y2 }
+        HidCmd::Touch2 {
+            phase,
+            x1,
+            y1,
+            x2,
+            y2,
+        }
     }
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
@@ -378,15 +428,24 @@ mod tests {
     #[test]
     fn center_tap_streams_immediately() {
         let mut r = r();
-        assert_eq!(r.down(200.0, 400.0, false, false, T0), vec![t(Phase::Down, 200.0, 400.0, Edge::None)]);
-        assert_eq!(r.up(200.0, 400.0, T0), vec![t(Phase::Up, 200.0, 400.0, Edge::None)]);
+        assert_eq!(
+            r.down(200.0, 400.0, false, false, T0),
+            vec![t(Phase::Down, 200.0, 400.0, Edge::None)]
+        );
+        assert_eq!(
+            r.up(200.0, 400.0, T0),
+            vec![t(Phase::Up, 200.0, 400.0, Edge::None)]
+        );
     }
 
     #[test]
     fn bottom_edge_inward_replays_from_edge() {
         let mut r = r();
         assert!(r.down(200.0, 860.0, false, false, T0).is_empty());
-        assert!(r.move_to(200.0, 856.0, T0).is_empty(), "4 pt up is still held");
+        assert!(
+            r.move_to(200.0, 856.0, T0).is_empty(),
+            "4 pt up is still held"
+        );
         assert_eq!(
             r.move_to(200.0, 850.0, T0),
             vec![
@@ -395,8 +454,14 @@ mod tests {
                 t(Phase::Move, 200.0, 850.0, Edge::Bottom),
             ]
         );
-        assert_eq!(r.move_to(200.0, 700.0, T0), vec![t(Phase::Move, 200.0, 700.0, Edge::Bottom)]);
-        assert_eq!(r.up(200.0, 700.0, T0), vec![t(Phase::Up, 200.0, 700.0, Edge::Bottom)]);
+        assert_eq!(
+            r.move_to(200.0, 700.0, T0),
+            vec![t(Phase::Move, 200.0, 700.0, Edge::Bottom)]
+        );
+        assert_eq!(
+            r.up(200.0, 700.0, T0),
+            vec![t(Phase::Up, 200.0, 700.0, Edge::Bottom)]
+        );
     }
 
     #[test]
@@ -405,7 +470,10 @@ mod tests {
         assert!(r.down(200.0, 8.0, false, false, T0).is_empty());
         assert_eq!(
             r.up(200.0, 8.0, T0),
-            vec![t(Phase::Down, 200.0, 8.0, Edge::None), t(Phase::Up, 200.0, 8.0, Edge::None)]
+            vec![
+                t(Phase::Down, 200.0, 8.0, Edge::None),
+                t(Phase::Up, 200.0, 8.0, Edge::None)
+            ]
         );
     }
 
@@ -415,10 +483,19 @@ mod tests {
         assert!(r.down(200.0, 860.0, false, false, T0).is_empty());
         assert_eq!(
             r.move_to(220.0, 858.0, T0),
-            vec![t(Phase::Down, 200.0, 860.0, Edge::None), t(Phase::Move, 220.0, 858.0, Edge::None)]
+            vec![
+                t(Phase::Down, 200.0, 860.0, Edge::None),
+                t(Phase::Move, 220.0, 858.0, Edge::None)
+            ]
         );
-        assert_eq!(r.move_to(240.0, 858.0, T0), vec![t(Phase::Move, 240.0, 858.0, Edge::None)]);
-        assert_eq!(r.up(240.0, 858.0, T0), vec![t(Phase::Up, 240.0, 858.0, Edge::None)]);
+        assert_eq!(
+            r.move_to(240.0, 858.0, T0),
+            vec![t(Phase::Move, 240.0, 858.0, Edge::None)]
+        );
+        assert_eq!(
+            r.up(240.0, 858.0, T0),
+            vec![t(Phase::Up, 240.0, 858.0, Edge::None)]
+        );
     }
 
     #[test]
@@ -427,20 +504,29 @@ mod tests {
         assert!(r.down(5.0, 400.0, false, false, T0).is_empty());
         assert_eq!(
             r.move_to(25.0, 400.0, T0),
-            vec![t(Phase::Down, 1.0, 400.0, Edge::Left), t(Phase::Move, 25.0, 400.0, Edge::Left)]
+            vec![
+                t(Phase::Down, 1.0, 400.0, Edge::Left),
+                t(Phase::Move, 25.0, 400.0, Edge::Left)
+            ]
         );
         r.up(25.0, 400.0, T0);
         assert!(r.down(200.0, 5.0, false, false, T0).is_empty());
         assert_eq!(
             r.move_to(200.0, 30.0, T0),
-            vec![t(Phase::Down, 200.0, 1.0, Edge::Top), t(Phase::Move, 200.0, 30.0, Edge::Top)]
+            vec![
+                t(Phase::Down, 200.0, 1.0, Edge::Top),
+                t(Phase::Move, 200.0, 30.0, Edge::Top)
+            ]
         );
     }
 
     #[test]
     fn option_drag_pinches_live() {
         let mut r = r();
-        assert_eq!(r.down(200.0, 400.0, true, false, T0), vec![t2(Phase::Down, 150.0, 400.0, 250.0, 400.0)]);
+        assert_eq!(
+            r.down(200.0, 400.0, true, false, T0),
+            vec![t2(Phase::Down, 150.0, 400.0, 250.0, 400.0)]
+        );
         let rad = 50.0 * 1f64.exp();
         assert_eq!(
             r.move_to(200.0, 250.0, T0),
@@ -450,15 +536,27 @@ mod tests {
             r.move_to(200.0, -1000.0, T0),
             vec![t2(Phase::Move, 0.0, 400.0, 400.0, 400.0)] // scale clamps to 4, r = 200
         );
-        assert_eq!(r.up(200.0, -1000.0, T0), vec![t2(Phase::Up, 0.0, 400.0, 400.0, 400.0)]);
+        assert_eq!(
+            r.up(200.0, -1000.0, T0),
+            vec![t2(Phase::Up, 0.0, 400.0, 400.0, 400.0)]
+        );
     }
 
     #[test]
     fn option_shift_drag_pans_two_fingers() {
         let mut r = r();
-        assert_eq!(r.down(200.0, 400.0, true, true, T0), vec![t2(Phase::Down, 150.0, 400.0, 250.0, 400.0)]);
-        assert_eq!(r.move_to(220.0, 380.0, T0), vec![t2(Phase::Move, 170.0, 380.0, 270.0, 380.0)]);
-        assert_eq!(r.up(220.0, 380.0, T0), vec![t2(Phase::Up, 170.0, 380.0, 270.0, 380.0)]);
+        assert_eq!(
+            r.down(200.0, 400.0, true, true, T0),
+            vec![t2(Phase::Down, 150.0, 400.0, 250.0, 400.0)]
+        );
+        assert_eq!(
+            r.move_to(220.0, 380.0, T0),
+            vec![t2(Phase::Move, 170.0, 380.0, 270.0, 380.0)]
+        );
+        assert_eq!(
+            r.up(220.0, 380.0, T0),
+            vec![t2(Phase::Up, 170.0, 380.0, 270.0, 380.0)]
+        );
     }
 
     #[test]
@@ -480,34 +578,55 @@ mod tests {
             r.scroll(0.0, 0.0, 0.0, 0.0, ScrollPhase::Ended, ms(48)),
             vec![t(Phase::Up, 402.0, 370.0, Edge::None)]
         );
-        assert!(r.scroll(0.0, 0.0, 5.0, 5.0, ScrollPhase::Momentum, ms(64)).is_empty());
+        assert!(
+            r.scroll(0.0, 0.0, 5.0, 5.0, ScrollPhase::Momentum, ms(64))
+                .is_empty()
+        );
         assert!(r.tick(ms(1000)).is_empty());
 
         // No Ended: idle lift via tick, measured from the last event.
         r.scroll(100.0, 100.0, 0.0, 0.0, ScrollPhase::Began, ms(2000));
         r.scroll(0.0, 0.0, 0.0, 10.0, ScrollPhase::Changed, ms(2040));
         assert!(r.tick(ms(2189)).is_empty());
-        assert_eq!(r.tick(ms(2190)), vec![t(Phase::Up, 100.0, 110.0, Edge::None)]);
+        assert_eq!(
+            r.tick(ms(2190)),
+            vec![t(Phase::Up, 100.0, 110.0, Edge::None)]
+        );
         assert!(r.tick(ms(3000)).is_empty());
         // Momentum while a pan is live emits nothing either.
         r.scroll(100.0, 100.0, 0.0, 0.0, ScrollPhase::Began, ms(4000));
-        assert!(r.scroll(0.0, 0.0, 9.0, 9.0, ScrollPhase::Momentum, ms(4010)).is_empty());
+        assert!(
+            r.scroll(0.0, 0.0, 9.0, 9.0, ScrollPhase::Momentum, ms(4010))
+                .is_empty()
+        );
     }
 
     #[test]
     fn drag_outside_box_clamps() {
         let mut r = r();
         r.down(200.0, 400.0, false, false, T0);
-        assert_eq!(r.move_to(-50.0, 1000.0, T0), vec![t(Phase::Move, 0.0, 874.0, Edge::None)]);
-        assert_eq!(r.up(-50.0, 1000.0, T0), vec![t(Phase::Up, 0.0, 874.0, Edge::None)]);
+        assert_eq!(
+            r.move_to(-50.0, 1000.0, T0),
+            vec![t(Phase::Move, 0.0, 874.0, Edge::None)]
+        );
+        assert_eq!(
+            r.up(-50.0, 1000.0, T0),
+            vec![t(Phase::Up, 0.0, 874.0, Edge::None)]
+        );
     }
 
     #[test]
     fn scroll_ignored_while_mouse_down() {
         let mut r = r();
         r.down(200.0, 400.0, false, false, T0);
-        assert!(r.scroll(200.0, 400.0, 0.0, 0.0, ScrollPhase::Began, T0).is_empty());
-        assert!(r.scroll(200.0, 400.0, 5.0, 5.0, ScrollPhase::Changed, T0).is_empty());
+        assert!(
+            r.scroll(200.0, 400.0, 0.0, 0.0, ScrollPhase::Began, T0)
+                .is_empty()
+        );
+        assert!(
+            r.scroll(200.0, 400.0, 5.0, 5.0, ScrollPhase::Changed, T0)
+                .is_empty()
+        );
         assert!(r.tick(ms(1000)).is_empty());
     }
 
@@ -518,19 +637,28 @@ mod tests {
         r.move_to(210.0, 410.0, T0);
         assert_eq!(
             r.down(100.0, 100.0, false, false, T0),
-            vec![t(Phase::Up, 210.0, 410.0, Edge::None), t(Phase::Down, 100.0, 100.0, Edge::None)]
+            vec![
+                t(Phase::Up, 210.0, 410.0, Edge::None),
+                t(Phase::Down, 100.0, 100.0, Edge::None)
+            ]
         );
         // A pinch in flight lifts both fingers where they were.
         r.up(100.0, 100.0, T0);
         r.down(200.0, 400.0, true, false, T0);
         assert_eq!(
             r.down(100.0, 100.0, false, false, T0),
-            vec![t2(Phase::Up, 150.0, 400.0, 250.0, 400.0), t(Phase::Down, 100.0, 100.0, Edge::None)]
+            vec![
+                t2(Phase::Up, 150.0, 400.0, 250.0, 400.0),
+                t(Phase::Down, 100.0, 100.0, Edge::None)
+            ]
         );
         // A held edge touch never reached the device: dropped, nothing to lift.
         r.up(100.0, 100.0, T0);
         assert!(r.down(200.0, 860.0, false, false, T0).is_empty());
-        assert_eq!(r.down(100.0, 100.0, false, false, T0), vec![t(Phase::Down, 100.0, 100.0, Edge::None)]);
+        assert_eq!(
+            r.down(100.0, 100.0, false, false, T0),
+            vec![t(Phase::Down, 100.0, 100.0, Edge::None)]
+        );
     }
 
     #[test]
@@ -543,18 +671,33 @@ mod tests {
         r.down(200.0, 400.0, false, false, T0);
         assert_eq!(
             r.two_finger(Phase::Down, [100.0, 400.0, 500.0, 400.0]),
-            vec![t(Phase::Up, 200.0, 400.0, Edge::None), t2(Phase::Down, 100.0, 400.0, 402.0, 400.0)]
+            vec![
+                t(Phase::Up, 200.0, 400.0, Edge::None),
+                t2(Phase::Down, 100.0, 400.0, 402.0, 400.0)
+            ]
         );
         // Rotation: each finger goes exactly where it is put.
-        assert_eq!(r.two_finger(Phase::Move, [150.0, 350.0, 250.0, 450.0]), vec![t2(Phase::Move, 150.0, 350.0, 250.0, 450.0)]);
+        assert_eq!(
+            r.two_finger(Phase::Move, [150.0, 350.0, 250.0, 450.0]),
+            vec![t2(Phase::Move, 150.0, 350.0, 250.0, 450.0)]
+        );
         // Scroll can't start a pan while two fingers are down.
-        assert!(r.scroll(100.0, 100.0, 0.0, 0.0, ScrollPhase::Began, T0).is_empty());
-        assert_eq!(r.two_finger(Phase::Up, [160.0, 340.0, 240.0, 460.0]), vec![t2(Phase::Up, 160.0, 340.0, 240.0, 460.0)]);
+        assert!(
+            r.scroll(100.0, 100.0, 0.0, 0.0, ScrollPhase::Began, T0)
+                .is_empty()
+        );
+        assert_eq!(
+            r.two_finger(Phase::Up, [160.0, 340.0, 240.0, 460.0]),
+            vec![t2(Phase::Up, 160.0, 340.0, 240.0, 460.0)]
+        );
         // A mouse down lifts a two-finger contact left down.
         r.two_finger(Phase::Down, [100.0, 100.0, 200.0, 200.0]);
         assert_eq!(
             r.down(50.0, 400.0, false, false, T0),
-            vec![t2(Phase::Up, 100.0, 100.0, 200.0, 200.0), t(Phase::Down, 50.0, 400.0, Edge::None)]
+            vec![
+                t2(Phase::Up, 100.0, 100.0, 200.0, 200.0),
+                t(Phase::Down, 50.0, 400.0, Edge::None)
+            ]
         );
     }
 
@@ -564,7 +707,10 @@ mod tests {
         r.scroll(100.0, 100.0, 0.0, 0.0, ScrollPhase::Began, T0);
         assert_eq!(
             r.down(200.0, 400.0, false, false, T0),
-            vec![t(Phase::Up, 100.0, 100.0, Edge::None), t(Phase::Down, 200.0, 400.0, Edge::None)]
+            vec![
+                t(Phase::Up, 100.0, 100.0, Edge::None),
+                t(Phase::Down, 200.0, 400.0, Edge::None)
+            ]
         );
     }
 }

@@ -70,7 +70,10 @@ pub(crate) fn parse_devices(json: &str) -> Result<Vec<Device>, Error> {
         .map_err(|e| Error::Simctl(format!("bad simctl device json: {e}")))?;
     let mut out = Vec::new();
     for (runtime, list) in raw.devices {
-        let runtime = runtime.strip_prefix(RUNTIME_PREFIX).unwrap_or(&runtime).to_string();
+        let runtime = runtime
+            .strip_prefix(RUNTIME_PREFIX)
+            .unwrap_or(&runtime)
+            .to_string();
         for d in list.into_iter().filter(|d| d.is_available) {
             out.push(Device {
                 udid: d.udid,
@@ -91,16 +94,29 @@ fn run_simctl(args: &[&str], timeout: Duration) -> Result<(bool, String, String)
 }
 
 /// [`run_simctl`] with `input` written to the child's stdin.
-fn run_simctl_input(args: &[&str], input: &[u8], timeout: Duration) -> Result<(bool, String, String), Error> {
+fn run_simctl_input(
+    args: &[&str],
+    input: &[u8],
+    timeout: Duration,
+) -> Result<(bool, String, String), Error> {
     run("xcrun", &[&["simctl"], args].concat(), Some(input), timeout)
 }
 
 /// Run `program`, feeding it `input` (if any) and draining both pipes on threads so
 /// neither side can block the other; kills the child after `timeout`.
-fn run(program: &str, args: &[&str], input: Option<&[u8]>, timeout: Duration) -> Result<(bool, String, String), Error> {
+fn run(
+    program: &str,
+    args: &[&str],
+    input: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<(bool, String, String), Error> {
     let mut child = Command::new(program)
         .args(args)
-        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -157,7 +173,9 @@ pub fn list_devices() -> Result<Vec<Device>, Error> {
 /// List installed simulator apps (including system apps) by bundle identifier.
 pub fn list_apps(udid: &str) -> Result<Vec<App>, Error> {
     let (ok, plist, err) = run_simctl(&["listapps", udid], Duration::from_secs(30))?;
-    if !ok { return Err(Error::Simctl(err.trim().to_string())); }
+    if !ok {
+        return Err(Error::Simctl(err.trim().to_string()));
+    }
     parse_apps(&plist)
 }
 
@@ -165,24 +183,50 @@ fn parse_apps(plist: &str) -> Result<Vec<App>, Error> {
     let json = plist_json(plist)?;
     let entries: std::collections::BTreeMap<String, Value> = serde_json::from_str(&json)
         .map_err(|e| Error::Simctl(format!("bad simctl app list: {e}")))?;
-    let mut apps = entries.into_iter().map(|(bundle_id, value)| {
-        let name = value.get("CFBundleDisplayName").and_then(Value::as_str)
-            .or_else(|| value.get("CFBundleName").and_then(Value::as_str))
-            .unwrap_or(&bundle_id).to_string();
-        let app_type = value.get("ApplicationType").and_then(Value::as_str).unwrap_or("Unknown").to_string();
-        App { bundle_id, name, app_type }
-    }).collect::<Vec<_>>();
-    apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.bundle_id.cmp(&b.bundle_id)));
+    let mut apps = entries
+        .into_iter()
+        .map(|(bundle_id, value)| {
+            let name = value
+                .get("CFBundleDisplayName")
+                .and_then(Value::as_str)
+                .or_else(|| value.get("CFBundleName").and_then(Value::as_str))
+                .unwrap_or(&bundle_id)
+                .to_string();
+            let app_type = value
+                .get("ApplicationType")
+                .and_then(Value::as_str)
+                .unwrap_or("Unknown")
+                .to_string();
+            App {
+                bundle_id,
+                name,
+                app_type,
+            }
+        })
+        .collect::<Vec<_>>();
+    apps.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.bundle_id.cmp(&b.bundle_id))
+    });
     Ok(apps)
 }
 
 fn plist_json(plist: &str) -> Result<String, Error> {
-    let (ok, json, err) =
-        run("plutil", &["-convert", "json", "-o", "-", "-"], Some(plist.as_bytes()), Duration::from_secs(30))?;
+    let (ok, json, err) = run(
+        "plutil",
+        &["-convert", "json", "-o", "-", "-"],
+        Some(plist.as_bytes()),
+        Duration::from_secs(30),
+    )?;
     if ok {
         Ok(json)
     } else {
-        Err(Error::Simctl(format!("plutil could not parse simctl app list: {}", err.trim())))
+        Err(Error::Simctl(format!(
+            "plutil could not parse simctl app list: {}",
+            err.trim()
+        )))
     }
 }
 
@@ -192,33 +236,64 @@ pub fn clear_app_data(udid: &str, bundle_id: &str) -> Result<(), Error> {
     if udid.len() != 36 || !udid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
         return Err(Error::Simctl("invalid simulator UDID".into()));
     }
-    if bundle_id.is_empty() || bundle_id.contains('/') || bundle_id.contains('\\') || bundle_id.contains('\0') {
+    if bundle_id.is_empty()
+        || bundle_id.contains('/')
+        || bundle_id.contains('\\')
+        || bundle_id.contains('\0')
+    {
         return Err(Error::Simctl("invalid app bundle identifier".into()));
     }
-    let (ok, path, err) = run_simctl(&["get_app_container", udid, bundle_id, "data"], Duration::from_secs(30))?;
-    if !ok { return Err(Error::Simctl(format!("get app data container failed: {}", err.trim()))); }
+    let (ok, path, err) = run_simctl(
+        &["get_app_container", udid, bundle_id, "data"],
+        Duration::from_secs(30),
+    )?;
+    if !ok {
+        return Err(Error::Simctl(format!(
+            "get app data container failed: {}",
+            err.trim()
+        )));
+    }
     let container = PathBuf::from(path.trim()).canonicalize()?;
     if !is_sim_app_data_container(&container, udid) {
-        return Err(Error::Simctl(format!("refusing to clear unexpected data container: {}", container.display())));
+        return Err(Error::Simctl(format!(
+            "refusing to clear unexpected data container: {}",
+            container.display()
+        )));
     }
-    let (terminated, _, terminate_err) = run_simctl(&["terminate", udid, bundle_id], Duration::from_secs(30))?;
+    let (terminated, _, terminate_err) =
+        run_simctl(&["terminate", udid, bundle_id], Duration::from_secs(30))?;
     if !terminated && !terminate_err.to_ascii_lowercase().contains("not running") {
-        return Err(Error::Simctl(format!("could not terminate app before clearing data: {}", terminate_err.trim())));
+        return Err(Error::Simctl(format!(
+            "could not terminate app before clearing data: {}",
+            terminate_err.trim()
+        )));
     }
     for entry in std::fs::read_dir(&container)? {
         let entry = entry?;
         let path = entry.path();
         let kind = entry.file_type()?;
-        if kind.is_dir() { std::fs::remove_dir_all(path)?; } else { std::fs::remove_file(path)?; }
+        if kind.is_dir() {
+            std::fs::remove_dir_all(path)?;
+        } else {
+            std::fs::remove_file(path)?;
+        }
     }
     Ok(())
 }
 
 fn is_sim_app_data_container(path: &Path, udid: &str) -> bool {
-    let c = path.components().filter_map(|c| match c { Component::Normal(s) => s.to_str(), _ => None }).collect::<Vec<_>>();
+    let c = path
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     c.len() >= 7
-        && c[c.len() - 7..c.len() - 1] == ["Devices", udid, "data", "Containers", "Data", "Application"]
-        && c.last().is_some_and(|s| s.len() == 36 && s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
+        && c[c.len() - 7..c.len() - 1]
+            == ["Devices", udid, "data", "Containers", "Data", "Application"]
+        && c.last()
+            .is_some_and(|s| s.len() == 36 && s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
 }
 
 /// Boot headlessly and wait until ready. Already-booted is success.
@@ -229,7 +304,11 @@ pub fn boot(udid: &str) -> Result<(), Error> {
     }
     Err(Error::Simctl(format!(
         "bootstatus failed: {}",
-        if err.trim().is_empty() { "(no stderr)" } else { err.trim() }
+        if err.trim().is_empty() {
+            "(no stderr)"
+        } else {
+            err.trim()
+        }
     )))
 }
 
@@ -244,8 +323,11 @@ pub fn shutdown(udid: &str) -> Result<(), Error> {
 
 /// Copy UTF-8 text to a simulator's pasteboard. An empty string clears it.
 pub fn clipboard_write(udid: &str, text: &str) -> Result<(), Error> {
-    let (ok, _, err) = run_simctl_input(&["pbcopy", udid], text.as_bytes(), Duration::from_secs(10))?;
-    if ok { return Ok(()); }
+    let (ok, _, err) =
+        run_simctl_input(&["pbcopy", udid], text.as_bytes(), Duration::from_secs(10))?;
+    if ok {
+        return Ok(());
+    }
     // Some CoreSimulator runtimes apply the pasteboard write but then time out while
     // waiting for the host-side clipboard notification. Confirm the observable state
     // before treating that runtime response as a failure.
@@ -258,12 +340,20 @@ pub fn clipboard_write(udid: &str, text: &str) -> Result<(), Error> {
 /// Read UTF-8 text from a simulator's pasteboard.
 pub fn clipboard_read(udid: &str) -> Result<String, Error> {
     let (ok, out, err) = run_simctl(&["pbpaste", udid], Duration::from_secs(10))?;
-    if ok { Ok(out) } else { Err(Error::Simctl(format!("pbpaste failed: {}", err.trim()))) }
+    if ok {
+        Ok(out)
+    } else {
+        Err(Error::Simctl(format!("pbpaste failed: {}", err.trim())))
+    }
 }
 
 fn simctl_ok(args: &[&str]) -> Result<(), Error> {
     let (ok, _, err) = run_simctl(args, Duration::from_secs(30))?;
-    if ok { Ok(()) } else { Err(Error::Simctl(err.trim().to_string())) }
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::Simctl(err.trim().to_string()))
+    }
 }
 
 pub fn open_url(udid: &str, url: &str) -> Result<(), Error> {
@@ -279,7 +369,11 @@ pub fn terminate(udid: &str, bundle_id: &str) -> Result<(), Error> {
 }
 
 pub fn set_location(udid: &str, lat: f64, lon: f64) -> Result<(), Error> {
-    if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) || !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
+    if !lat.is_finite()
+        || !(-90.0..=90.0).contains(&lat)
+        || !lon.is_finite()
+        || !(-180.0..=180.0).contains(&lon)
+    {
         return Err(Error::Simctl("latitude/longitude out of range".into()));
     }
     let coordinates = format!("{lat},{lon}");
@@ -287,10 +381,21 @@ pub fn set_location(udid: &str, lat: f64, lon: f64) -> Result<(), Error> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Appearance { Light, Dark }
+pub enum Appearance {
+    Light,
+    Dark,
+}
 
 pub fn set_appearance(udid: &str, appearance: Appearance) -> Result<(), Error> {
-    simctl_ok(&["ui", udid, "appearance", match appearance { Appearance::Light => "light", Appearance::Dark => "dark" }])
+    simctl_ok(&[
+        "ui",
+        udid,
+        "appearance",
+        match appearance {
+            Appearance::Light => "light",
+            Appearance::Dark => "dark",
+        },
+    ])
 }
 
 pub fn grant_permission(udid: &str, service: &str, bundle_id: &str) -> Result<(), Error> {
@@ -310,7 +415,17 @@ pub fn set_content_size(udid: &str, size: &str) -> Result<(), Error> {
 }
 
 pub fn status_bar_override(udid: &str) -> Result<(), Error> {
-    simctl_ok(&["status_bar", udid, "override", "--time", "9:41", "--batteryLevel", "100", "--batteryState", "charged"])
+    simctl_ok(&[
+        "status_bar",
+        udid,
+        "override",
+        "--time",
+        "9:41",
+        "--batteryLevel",
+        "100",
+        "--batteryState",
+        "charged",
+    ])
 }
 
 pub fn status_bar_clear(udid: &str) -> Result<(), Error> {
@@ -345,11 +460,17 @@ mod tests {
     fn parses_fixture() {
         let ds = parse_devices(FIXTURE).unwrap();
         assert_eq!(ds.len(), 3);
-        let d = ds.iter().find(|d| d.udid == "8BC981D2-7C86-4EFC-944C-AC33FD0262FC").unwrap();
+        let d = ds
+            .iter()
+            .find(|d| d.udid == "8BC981D2-7C86-4EFC-944C-AC33FD0262FC")
+            .unwrap();
         assert_eq!(d.name, "iPhone 18 Pro");
         assert_eq!(d.state, "Booted");
         assert_eq!(d.runtime, "iOS-27-0");
-        assert_eq!(d.device_type, "com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro");
+        assert_eq!(
+            d.device_type,
+            "com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro"
+        );
         assert!(ds.iter().any(|d| d.runtime == "iOS-27-1"));
     }
 
@@ -372,10 +493,18 @@ mod tests {
     #[test]
     fn app_data_clear_accepts_only_simulator_application_containers() {
         let udid = "8BC981D2-7C86-4EFC-944C-AC33FD0262FC";
-        let good = Path::new("/Users/test/Library/Developer/CoreSimulator/Devices/8BC981D2-7C86-4EFC-944C-AC33FD0262FC/data/Containers/Data/Application/B5D07B81-A27A-4A8C-84D6-031FFB375944");
-        let wrong_sim = good.to_string_lossy().replace(udid, "00000000-0000-0000-0000-000000000000");
-        let too_high = Path::new("/Users/test/Library/Developer/CoreSimulator/Devices/8BC981D2-7C86-4EFC-944C-AC33FD0262FC/data/Containers/Data/Application");
-        let nested = Path::new("/Users/test/Library/Developer/CoreSimulator/Devices/8BC981D2-7C86-4EFC-944C-AC33FD0262FC/data/Containers/Data/Application/B5D07B81-A27A-4A8C-84D6-031FFB375944/extra/A5D07B81-A27A-4A8C-84D6-031FFB375944");
+        let good = Path::new(
+            "/Users/test/Library/Developer/CoreSimulator/Devices/8BC981D2-7C86-4EFC-944C-AC33FD0262FC/data/Containers/Data/Application/B5D07B81-A27A-4A8C-84D6-031FFB375944",
+        );
+        let wrong_sim = good
+            .to_string_lossy()
+            .replace(udid, "00000000-0000-0000-0000-000000000000");
+        let too_high = Path::new(
+            "/Users/test/Library/Developer/CoreSimulator/Devices/8BC981D2-7C86-4EFC-944C-AC33FD0262FC/data/Containers/Data/Application",
+        );
+        let nested = Path::new(
+            "/Users/test/Library/Developer/CoreSimulator/Devices/8BC981D2-7C86-4EFC-944C-AC33FD0262FC/data/Containers/Data/Application/B5D07B81-A27A-4A8C-84D6-031FFB375944/extra/A5D07B81-A27A-4A8C-84D6-031FFB375944",
+        );
         assert!(is_sim_app_data_container(good, udid));
         assert!(!is_sim_app_data_container(Path::new(&wrong_sim), udid));
         assert!(!is_sim_app_data_container(too_high, udid));
@@ -392,23 +521,44 @@ mod tests {
     #[test]
     fn resolve_unknown_udid() {
         let ds = vec![dev("A", "Shutdown", "iPhone-X")];
-        assert!(matches!(DeviceSelector::Udid("Z".into()).resolve(&ds), Err(Error::NoDevice)));
+        assert!(matches!(
+            DeviceSelector::Udid("Z".into()).resolve(&ds),
+            Err(Error::NoDevice)
+        ));
     }
 
     #[test]
     fn resolve_prefers_booted() {
         let ds = vec![dev("A", "Shutdown", "iPhone-X"), dev("B", "Booted", "iPad")];
-        assert_eq!(DeviceSelector::FirstBootedOrIphone.resolve(&ds).unwrap().udid, "B");
+        assert_eq!(
+            DeviceSelector::FirstBootedOrIphone
+                .resolve(&ds)
+                .unwrap()
+                .udid,
+            "B"
+        );
     }
 
     #[test]
     fn resolve_iphone_fallback() {
-        let ds = vec![dev("A", "Shutdown", "iPad"), dev("B", "Shutdown", "iPhone-X")];
-        assert_eq!(DeviceSelector::FirstBootedOrIphone.resolve(&ds).unwrap().udid, "B");
+        let ds = vec![
+            dev("A", "Shutdown", "iPad"),
+            dev("B", "Shutdown", "iPhone-X"),
+        ];
+        assert_eq!(
+            DeviceSelector::FirstBootedOrIphone
+                .resolve(&ds)
+                .unwrap()
+                .udid,
+            "B"
+        );
     }
 
     #[test]
     fn resolve_empty() {
-        assert!(matches!(DeviceSelector::FirstBootedOrIphone.resolve(&[]), Err(Error::NoDevice)));
+        assert!(matches!(
+            DeviceSelector::FirstBootedOrIphone.resolve(&[]),
+            Err(Error::NoDevice)
+        ));
     }
 }

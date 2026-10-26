@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
-use crate::helper::{lock, Supervised};
+use crate::helper::{Supervised, lock};
 
 /// Bound on one snapshot, spawning sdax and the guest's cold start included.
 const SNAPSHOT_WAIT: Duration = Duration::from_secs(15);
@@ -44,7 +44,10 @@ fn enabled_default() -> bool {
 impl AxNode {
     /// Centre of the frame in screen points.
     pub fn center(&self) -> (f64, f64) {
-        (self.frame[0] + self.frame[2] / 2.0, self.frame[1] + self.frame[3] / 2.0)
+        (
+            self.frame[0] + self.frame[2] / 2.0,
+            self.frame[1] + self.frame[3] / 2.0,
+        )
     }
 
     /// This node and every descendant, depth first.
@@ -164,19 +167,28 @@ impl Ax {
 /// Ask for snapshot `id`. The flag says whether this sdax is still usable.
 fn ask(run: &Running, id: u64) -> (Result<AxNode, Error>, bool) {
     // If sdax is gone already, its exit (and maybe an error line) is on the way.
-    let _ = run.helper.send_line(&format!(r#"{{"t":"snapshot","id":{id}}}"#));
+    let _ = run
+        .helper
+        .send_line(&format!(r#"{{"t":"snapshot","id":{id}}}"#));
     let deadline = Instant::now() + SNAPSHOT_WAIT;
     let mut detail: Option<String> = None;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         match run.rx.recv_timeout(left) {
             Ok(Msg::Line(l)) => {
-                let Ok(r) = serde_json::from_str::<Reply>(&l) else { continue };
+                let Ok(r) = serde_json::from_str::<Reply>(&l) else {
+                    continue;
+                };
                 match r.t.as_str() {
                     "ax" if r.id == id => {
                         return match (r.root, r.error) {
                             (Some(root), _) => (Ok(root), true),
-                            (None, e) => (Err(Error::Accessibility(e.unwrap_or_else(|| "empty reply".into()))), true),
+                            (None, e) => (
+                                Err(Error::Accessibility(
+                                    e.unwrap_or_else(|| "empty reply".into()),
+                                )),
+                                true,
+                            ),
                         };
                     }
                     "error" => detail = r.detail,
@@ -197,7 +209,13 @@ fn ask(run: &Running, id: u64) -> (Result<AxNode, Error>, bool) {
                 return (Err(e), false);
             }
             Err(RecvTimeoutError::Timeout) => {
-                return (Err(Error::Accessibility(format!("no snapshot within {}s", SNAPSHOT_WAIT.as_secs()))), false);
+                return (
+                    Err(Error::Accessibility(format!(
+                        "no snapshot within {}s",
+                        SNAPSHOT_WAIT.as_secs()
+                    ))),
+                    false,
+                );
             }
             Err(RecvTimeoutError::Disconnected) => {
                 return (Err(Error::Accessibility("sdax went away".into())), false);
@@ -228,7 +246,11 @@ mod tests {
         assert_eq!(a.descendants().len(), 2);
         let pid = lock(&ax.current).as_ref().unwrap().pid();
         ax.snapshot().unwrap();
-        assert_eq!(lock(&ax.current).as_ref().unwrap().pid(), pid, "sdax was respawned");
+        assert_eq!(
+            lock(&ax.current).as_ref().unwrap().pid(),
+            pid,
+            "sdax was respawned"
+        );
         ax.stop();
         assert!(matches!(ax.snapshot(), Err(Error::Accessibility(_))));
     }
@@ -237,7 +259,9 @@ mod tests {
     fn exit_4_is_unsupported_and_names_the_missing_piece() {
         let ax = fake(&["unsupported"]);
         match ax.snapshot() {
-            Err(Error::Unsupported(m)) => assert!(m.contains("frontmostApplicationWithDisplayId"), "{m}"),
+            Err(Error::Unsupported(m)) => {
+                assert!(m.contains("frontmostApplicationWithDisplayId"), "{m}")
+            }
             other => panic!("{other:?}"),
         }
         assert!(lock(&ax.current).is_none(), "a dead sdax is dropped");
@@ -270,7 +294,10 @@ mod tests {
             children: vec![],
         };
         let j = serde_json::to_string(&n).unwrap();
-        assert_eq!(j, r#"{"role":"AXButton","label":"Go","enabled":true,"frame":[1.0,2.0,3.0,4.0]}"#);
+        assert_eq!(
+            j,
+            r#"{"role":"AXButton","label":"Go","enabled":true,"frame":[1.0,2.0,3.0,4.0]}"#
+        );
         assert_eq!(serde_json::from_str::<AxNode>(&j).unwrap(), n);
     }
 }

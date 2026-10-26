@@ -19,8 +19,8 @@ use crate::shm::{Frame, ShmReader};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 enum Msg {
     Shm { name: String, slots: u32, cap: u64 },
@@ -101,7 +101,9 @@ impl FramePipeline {
 
     /// A handle for [`FramePipeline::capture`] that can wait without borrowing the pipeline.
     pub fn capturer(&self) -> Capturer {
-        Capturer { tx: self.tx.clone() }
+        Capturer {
+            tx: self.tx.clone(),
+        }
     }
 
     /// `shm` + `frame` lines handed to the worker so far.
@@ -200,7 +202,12 @@ mod tests {
 
     /// 2x2 frame whose pixels all carry `seq` (low byte), so a delivery proves which slot was read.
     fn write_frame(w: &ShmWriter, seq: u64) {
-        let h = FrameHeader { width: 2, height: 2, source_width: 4, source_height: 4 };
+        let h = FrameHeader {
+            width: 2,
+            height: 2,
+            source_width: 4,
+            source_height: 4,
+        };
         w.write(slot_of(seq), seq, &h, &[seq as u8; 16]);
     }
 
@@ -233,14 +240,24 @@ mod tests {
             },
             |_| {},
         );
-        let helper = Supervised::spawn(fake_helper(), vec!["echo".into()], pipeline.sink(), |_| {}).unwrap();
-        Rig { helper, frames: frx, release: rtx, pipeline }
+        let helper =
+            Supervised::spawn(fake_helper(), vec!["echo".into()], pipeline.sink(), |_| {}).unwrap();
+        Rig {
+            helper,
+            frames: frx,
+            release: rtx,
+            pipeline,
+        }
     }
 
     fn wait_lines(p: &FramePipeline, n: u64) {
         let t0 = Instant::now();
         while p.lines_seen() < n {
-            assert!(t0.elapsed() < W, "pipeline saw {} of {n} lines", p.lines_seen());
+            assert!(
+                t0.elapsed() < W,
+                "pipeline saw {} of {n} lines",
+                p.lines_seen()
+            );
             std::thread::sleep(Duration::from_millis(2));
         }
     }
@@ -250,10 +267,14 @@ mod tests {
         let n = shm_name("capture");
         let w = ShmWriter::create(&n, 3, 16).unwrap();
         let r = rig(false);
-        assert!(r.pipeline.capture(Duration::from_millis(100)).is_none(), "no frame read yet");
+        assert!(
+            r.pipeline.capture(Duration::from_millis(100)).is_none(),
+            "no frame read yet"
+        );
 
         write_frame(&w, 2);
-        r.helper.send_line(&format!("{}\n{}", shm_line(&n, 16), frame_line(2)));
+        r.helper
+            .send_line(&format!("{}\n{}", shm_line(&n, 16), frame_line(2)));
         r.frames.recv_timeout(W).expect("first frame");
         let c = r.pipeline.capture(W).expect("capture");
         assert_eq!((c.seq, c.data[0]), (2, 2));
@@ -268,10 +289,16 @@ mod tests {
         std::thread::scope(|s| {
             s.spawn(|| tx.send(p.capture(W)).unwrap());
             std::thread::sleep(Duration::from_millis(100));
-            assert!(rx.try_recv().is_err(), "a capture of an overwritten slot waits");
+            assert!(
+                rx.try_recv().is_err(),
+                "a capture of an overwritten slot waits"
+            );
             write_frame(&w, 10);
             r.helper.send_line(&frame_line(10));
-            let c = rx.recv_timeout(W).unwrap().expect("capture after the next frame");
+            let c = rx
+                .recv_timeout(W)
+                .unwrap()
+                .expect("capture after the next frame");
             assert_eq!((c.seq, c.data[0]), (10, 10));
         });
     }
@@ -284,7 +311,8 @@ mod tests {
 
         // Prime: one frame; its callback blocks until released, so the burst below piles up.
         write_frame(&w, 2);
-        r.helper.send_line(&format!("{}\n{}", shm_line(&n, 16), frame_line(2)));
+        r.helper
+            .send_line(&format!("{}\n{}", shm_line(&n, 16), frame_line(2)));
         let first = r.frames.recv_timeout(W).expect("first frame");
         assert_eq!((first.seq, first.data[0]), (2, 2));
 
@@ -298,9 +326,16 @@ mod tests {
         r.release.send(()).unwrap();
 
         let next = r.frames.recv_timeout(W).expect("frame after the burst");
-        assert_eq!((next.seq, next.data[0], next.width), (12, 12, 2), "only the newest of the burst");
+        assert_eq!(
+            (next.seq, next.data[0], next.width),
+            (12, 12, 2),
+            "only the newest of the burst"
+        );
         r.release.send(()).unwrap();
-        assert!(r.frames.recv_timeout(Duration::from_millis(300)).is_err(), "older burst frames must be skipped");
+        assert!(
+            r.frames.recv_timeout(Duration::from_millis(300)).is_err(),
+            "older burst frames must be skipped"
+        );
     }
 
     #[test]
@@ -314,10 +349,15 @@ mod tests {
         assert_eq!(r.frames.recv_timeout(W).unwrap().seq, 2);
 
         // A shm line naming a segment that is already gone: not fatal, the old reader stays.
-        r.helper.send_line(r#"{"t":"shm","name":"/sdt-gone-xyz","slots":3,"cap":16}"#);
+        r.helper
+            .send_line(r#"{"t":"shm","name":"/sdt-gone-xyz","slots":3,"cap":16}"#);
         write_frame(&w1, 4);
         r.helper.send_line(&frame_line(4));
-        assert_eq!(r.frames.recv_timeout(W).unwrap().seq, 4, "old reader kept after failed open");
+        assert_eq!(
+            r.frames.recv_timeout(W).unwrap().seq,
+            4,
+            "old reader kept after failed open"
+        );
 
         // A torn slot is skipped, not delivered.
         w1.begin(slot_of(6), 6);
@@ -325,13 +365,21 @@ mod tests {
 
         // New generation with a different size.
         let w2 = ShmWriter::create(&n2, 3, 64).unwrap();
-        let h = FrameHeader { width: 4, height: 4, source_width: 8, source_height: 8 };
+        let h = FrameHeader {
+            width: 4,
+            height: 4,
+            source_width: 8,
+            source_height: 8,
+        };
         w2.write(slot_of(8), 8, &h, &[8; 64]);
         r.helper.send_line(&shm_line(&n2, 64));
         r.helper.send_line(&frame_line(8));
         let f = r.frames.recv_timeout(W).unwrap();
         assert_eq!((f.seq, f.width, f.height, f.data.len()), (8, 4, 4, 64));
-        assert!(r.frames.recv_timeout(Duration::from_millis(200)).is_err(), "torn frame 6 must not be delivered");
+        assert!(
+            r.frames.recv_timeout(Duration::from_millis(200)).is_err(),
+            "torn frame 6 must not be delivered"
+        );
     }
 
     #[test]
@@ -354,13 +402,17 @@ mod tests {
                 let _ = ntx.send(n);
             },
         );
-        let helper = Supervised::spawn(fake_helper(), vec!["echo".into()], pipeline.sink(), |_| {}).unwrap();
+        let helper =
+            Supervised::spawn(fake_helper(), vec!["echo".into()], pipeline.sink(), |_| {}).unwrap();
         let sink = pipeline.sink();
         write_frame(&w, 2);
         helper.send_line(&format!("{}\n{}", shm_line(&n, 16), frame_line(2)));
         in_rx.recv_timeout(W).expect("callback entered");
         drop(pipeline);
-        assert!(done.load(Ordering::SeqCst), "drop returned while on_frame was still running");
+        assert!(
+            done.load(Ordering::SeqCst),
+            "drop returned while on_frame was still running"
+        );
         assert_eq!(frx.recv_timeout(W), Ok(2));
         // Lines still arriving from the helper (and notes) must not reach the callbacks.
         write_frame(&w, 4);
@@ -391,15 +443,19 @@ mod tests {
         write_frame(&w, 2);
         sink(shm_line(&n, 16));
         sink(frame_line(2));
-        drx.recv_timeout(W).expect("pipeline dropped from inside its own callback");
+        drx.recv_timeout(W)
+            .expect("pipeline dropped from inside its own callback");
     }
 
     #[test]
     fn notes_reach_on_note() {
         let (ntx, nrx) = mpsc::channel();
-        let p = FramePipeline::new(|_| {}, move |n| {
-            let _ = ntx.send(n);
-        });
+        let p = FramePipeline::new(
+            |_| {},
+            move |n| {
+                let _ = ntx.send(n);
+            },
+        );
         let sink = p.sink();
         sink(r#"{"t":"note","detail":"hello"}"#.into());
         sink("garbage".into());
