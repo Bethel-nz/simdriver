@@ -33,6 +33,27 @@ pub struct Device {
   pub runtime: String,
 }
 
+/// `Driver.start` off the JS thread: `sd::Driver::start` blocks until live.
+pub struct StartTask {
+  opts: Option<sd::Options>,
+  pump: Arc<Pump>,
+}
+
+impl Task for StartTask {
+  type Output = sd::Driver;
+  type JsValue = Driver;
+
+  fn compute(&mut self) -> Result<sd::Driver> {
+    let opts = self.opts.take().ok_or_else(|| Error::from_reason("start ran twice"))?;
+    let p = self.pump.clone();
+    sd::Driver::start(opts, move |ev| p.on_event(ev)).map_err(to_napi)
+  }
+
+  fn resolve(&mut self, _env: Env, core: sd::Driver) -> Result<Driver> {
+    Ok(Driver { core, pump: self.pump.clone() })
+  }
+}
+
 #[napi(object)]
 pub struct JsSize {
   pub width: f64,
@@ -222,8 +243,10 @@ fn button(s: &str) -> Result<sd::Button> {
 impl Driver {
   /// `pump` is the JS-side drain loop (index.js wraps the host's onEvent with it).
   /// The call argument is a token; the real events come back through `take_event`.
-  #[napi(factory)]
-  pub fn start(env: Env, opts: StartOpts, pump: Function<'_, bool, Unknown<'static>>) -> Result<Driver> {
+  /// Resolves once the driver is live (or after the bounded wait); the wait runs on the
+  /// libuv threadpool, so the JS thread stays free meanwhile.
+  #[napi(ts_return_type = "Promise<Driver>")]
+  pub fn start(opts: StartOpts, pump: Function<'_, bool, Unknown<'static>>) -> Result<AsyncTask<StartTask>> {
     let tsfn: PumpFn = pump
       .build_threadsafe_function::<bool>()
       .build()
@@ -244,10 +267,7 @@ impl Driver {
       scale: opts.scale.unwrap_or(2),
       helper_dir: opts.helper_dir.map(std::path::PathBuf::from),
     };
-    let p = pump_inner.clone();
-    let core = sd::Driver::start(core_opts, move |ev| p.on_event(ev)).map_err(to_napi)?;
-    let _ = env; // Env kept for signature stability; TSFN creation binds the env itself.
-    Ok(Driver { core, pump: pump_inner })
+    Ok(AsyncTask::new(StartTask { opts: Some(core_opts), pump: pump_inner }))
   }
 
   #[napi(getter)]

@@ -31,10 +31,14 @@ class Driver {
     this.#n = nativeDriver;
   }
 
-  static start(opts, onEvent) {
+  static async start(opts, onEvent) {
     if (typeof onEvent !== 'function') throw new TypeError('onEvent must be a function');
     const o = opts ?? {};
-    const n = native.Driver.start(
+    // Events can arrive before start resolves: the pump then leaves them parked (the
+    // native side holds them until pumpDone) and drains once the driver exists.
+    let n;
+    let parked = false;
+    n = await native.Driver.start(
       {
         // undefined, not null: napi maps a missing field to None but rejects null.
         udid: o.udid ?? undefined,
@@ -44,6 +48,10 @@ class Driver {
       },
       // The pump: drains parked events (latest frame wins) and re-arms; see src/lib.rs.
       () => {
+        if (!n) {
+          parked = true;
+          return;
+        }
         try {
           for (;;) {
             const ev = n.takeEvent();
@@ -69,6 +77,7 @@ class Driver {
         }
       },
     );
+    if (parked) n.pumpDone();
     return new Driver(n);
   }
 
@@ -117,9 +126,9 @@ class Driver {
   }
 }
 
-module.exports = {
-  listDevices: native.listDevices,
-  boot: native.boot,
-  shutdown: native.shutdown,
-  Driver,
-};
+// One `exports.x =` per name: Node's ESM loader finds CommonJS named exports by
+// scanning for this shape, so `import { Driver } from 'simdriver'` works there too.
+exports.listDevices = native.listDevices;
+exports.boot = native.boot;
+exports.shutdown = native.shutdown;
+exports.Driver = Driver;

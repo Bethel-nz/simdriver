@@ -44,13 +44,13 @@ describe('simdriver', () => {
     }
   });
 
-  test('Driver.start({}) accepts missing options (no null reaches napi)', () => {
+  test('Driver.start({}) accepts missing options (no null reaches napi)', async () => {
     // A bogus helperDir makes start fail after the options convert, without a simulator:
     // with a device it is "helper missing", without one "no device" — never a
     // "Failed to convert JavaScript value `Null`" from an unset udid.
     let message = '';
     try {
-      Driver.start({ helperDir: '/nonexistent/simdriver-helpers' }, () => {}).stop();
+      (await Driver.start({ helperDir: '/nonexistent/simdriver-helpers' }, () => {})).stop();
     } catch (e) {
       message = (e as Error).message;
     }
@@ -64,7 +64,12 @@ describe('simdriver', () => {
     const page = await openPage(udid, 'anim.html');
 
     const events: any[] = [];
-    const driver = Driver.start({ udid }, (e) => events.push(e));
+    // start resolves off the JS thread: a timer keeps ticking while it waits.
+    let ticks = 0;
+    const timer = setInterval(() => ticks++, 10);
+    const driver = await Driver.start({ udid }, (e) => events.push(e));
+    clearInterval(timer);
+    expect(ticks).toBeGreaterThan(0);
     expect(driver.udid).toBe(udid);
 
     const deadline = Date.now() + 10_000;

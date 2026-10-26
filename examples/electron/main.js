@@ -21,11 +21,11 @@ function createWindow() {
   return win;
 }
 
-function startDriver(win) {
+async function startDriver(win) {
   // Loaded here, not at the top: the selftest must run without the native addon built.
   const { Driver } = require('simdriver');
   const udid = process.env.SIMDRIVER_UDID || undefined;
-  driver = Driver.start({ udid }, (e) => {
+  driver = await Driver.start({ udid }, (e) => {
     if (win.isDestroyed()) return;
     if (e.type === 'frame') {
       // e.data is only valid until the next event; postMessage clones it now.
@@ -74,11 +74,9 @@ app.whenReady().then(() => {
       });
       return;
     }
-    try {
-      startDriver(win);
-    } catch (err) {
-      win.webContents.send('state', `error: ${err.message}`);
-    }
+    startDriver(win).catch((err) => {
+      if (!win.isDestroyed()) win.webContents.send('state', `error: ${err.message}`);
+    });
   });
 });
 

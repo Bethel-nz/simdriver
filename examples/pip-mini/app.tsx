@@ -34,6 +34,8 @@ function App() {
   const [lastPt, setLastPt] = useState('—')
   const img = useRef<ImgInstance>(null)
   const driver = useRef<Driver | null>(null)
+  // Bumped by every start/stop: a start that resolves after a newer one is stopped.
+  const startGen = useRef(0)
   const selRef = useRef<Device | null>(null)
   const rectRef = useRef({ x: 0, y: 0, width: 0, height: 0 })
   const dimsRef = useRef<{ width: number; height: number } | null>(null)
@@ -105,27 +107,34 @@ function App() {
     }
   }
 
-  function startLive(device?: Device) {
+  async function startLive(device?: Device) {
     const d = device ?? selRef.current
     if (!d) return
     stopLive(true)
+    const gen = ++startGen.current
     add(`live ● ${d.name}…`)
+    setState('starting')
     try {
-      driver.current = Driver.start({ udid: d.udid }, e => {
+      const started = await Driver.start({ udid: d.udid }, e => {
+        if (gen !== startGen.current) return
         if (e.type === 'frame') paint(e.width, e.height, e.data, e.sourceWidth, e.sourceHeight)
         else if (e.type === 'state') {
           setState(e.state)
           add(`state: ${e.state}`)
         } else add(e.text)
       })
-      setState(driver.current.state)
+      if (gen !== startGen.current) return started.stop()
+      driver.current = started
+      setState(started.state)
     } catch (e) {
-      driver.current = null
+      if (gen !== startGen.current) return
+      setState(null)
       add(`start failed: ${String(e).slice(0, 160)}`)
     }
   }
 
   function stopLive(silent = false) {
+    startGen.current++
     if (!driver.current) return
     driver.current.stop()
     driver.current = null

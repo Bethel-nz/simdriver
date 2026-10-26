@@ -82,5 +82,9 @@ export interface DriverOptions {
 }
 
 export const Driver: {
-  start(opts: DriverOptions, onEvent: (e: DriverEvent) => void): Driver;
+  /**
+   * Resolves once frames stream and input is connected (or after a bounded wait, still
+   * 'starting'). The wait runs off the JS thread; events may arrive before it resolves.
+   */
+  start(opts: DriverOptions, onEvent: (e: DriverEvent) => void): Promise<Driver>;
 };
