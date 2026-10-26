@@ -1,0 +1,10 @@
+[package]
+name = "rust-minimal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+simdriver = { path = "../../crates/simdriver" }
+winit = "0.30"
+softbuffer = "0.4"
