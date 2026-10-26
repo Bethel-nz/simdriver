@@ -72,7 +72,7 @@ void sd_string_free(char *s);
 uint32_t sd_grid_rows(double screen_w, double screen_h, uint32_t cols);
 
 /**
- * Centre of grid cell `name` (e.g. "C4": row C, column 4) in 0..1 of the screen,
+ * Centre of grid cell `name` (e.g. "C4": row C, column 4; rows skip E) in 0..1 of the screen,
  * written to `*x` and `*y`. False (nothing written) for a name outside the grid or a
  * NULL argument.
  */

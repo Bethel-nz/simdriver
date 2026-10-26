@@ -50,7 +50,8 @@ int main(void) {
     sd_string_free(NULL);
     double gx = 0, gy = 0;
     if (sd_grid_rows(402, 874, 6) != 13 || !sd_grid_cell(402, 874, 6, "a1", &gx, &gy)
-        || gx != 1.0 / 12.0 || gy != 1.0 / 26.0 || sd_grid_cell(402, 874, 6, "N1", &gx, &gy)) {
+        || gx != 1.0 / 12.0 || gy != 1.0 / 26.0 || sd_grid_cell(402, 874, 6, "O1", &gx, &gy)
+        || sd_grid_cell(402, 874, 6, "E1", &gx, &gy)) {
         fprintf(stderr, "grid: rows %u, A1 at (%f, %f)\n", sd_grid_rows(402, 874, 6), gx, gy);
         return 1;
     }

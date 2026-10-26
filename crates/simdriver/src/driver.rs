@@ -782,6 +782,14 @@ impl Driver {
         lock(&self.inner.input).screen
     }
 
+    /// A copy of the newest frame (what the screen shows now), or `None` if none comes
+    /// within `wait`. For one still image (an agent screenshot) without copying every
+    /// frame; the stream itself keeps going to `on_event`.
+    pub fn capture(&self, wait: Duration) -> Option<Frame> {
+        let capturer = lock(&self.inner.frame).pipeline.as_ref()?.capturer();
+        capturer.capture(wait)
+    }
+
     /// A tap at (`x`, `y`), normalized 0..1 inside the box: a pointer down and up.
     pub fn tap(&self, x: f64, y: f64) {
         self.pointer(Phase::Down, x, y, Modifiers::default());
@@ -1239,6 +1247,8 @@ mod tests {
         assert_eq!(rig.wait_hid_log(2), vec![touch(Phase::Down, 196.5, 725.0), touch(Phase::Up, 196.5, 725.0)]);
         let g = d.grid(Grid::DEFAULT_COLS).unwrap();
         assert_eq!(g, Grid { rows: 13, cols: 6 });
+        let f = d.capture(W).expect("capture");
+        assert_eq!((f.width, f.height, f.data.len()), (2, 2, 16));
         d.stop();
         assert!(matches!(d.accessibility(), Err(Error::Accessibility(_))));
     }

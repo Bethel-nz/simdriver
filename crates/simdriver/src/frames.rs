@@ -8,6 +8,9 @@
 //! one frame is in the callback at a time; frames announced while it runs pile up in the
 //! channel and collapse to the newest on the next pass.
 //!
+//! [`FramePipeline::capture`] asks the worker for a copy of the newest frame it has read,
+//! so a host that wants one still frame (an agent screenshot) needs no per-frame copy.
+//!
 //! Both callbacks run inside a [`CallbackGate`]: once drop returns, neither is running nor
 //! will start (except a drop from inside a callback, which does not wait for itself).
 use crate::helper::CallbackGate;
@@ -16,11 +19,13 @@ use crate::shm::{Frame, ShmReader};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Duration;
 use std::thread::{self, JoinHandle};
 
 enum Msg {
     Shm { name: String, slots: u32, cap: u64 },
     Frame { slot: u32, seq: u64 },
+    Capture(Sender<Frame>),
     Stop,
 }
 
@@ -87,9 +92,34 @@ impl FramePipeline {
         }
     }
 
+    /// A copy of the newest frame, or `None` if none arrives within `wait` (no frame
+    /// read yet, or the pipeline is gone). Usually immediate: the worker re-reads the
+    /// slot it last delivered; if sdframe has overwritten it, the next frame answers.
+    pub fn capture(&self, wait: Duration) -> Option<Frame> {
+        self.capturer().capture(wait)
+    }
+
+    /// A handle for [`FramePipeline::capture`] that can wait without borrowing the pipeline.
+    pub fn capturer(&self) -> Capturer {
+        Capturer { tx: self.tx.clone() }
+    }
+
     /// `shm` + `frame` lines handed to the worker so far.
     pub fn lines_seen(&self) -> u64 {
         self.lines.load(Ordering::SeqCst)
+    }
+}
+
+pub struct Capturer {
+    tx: Sender<Msg>,
+}
+
+impl Capturer {
+    /// See [`FramePipeline::capture`].
+    pub fn capture(&self, wait: Duration) -> Option<Frame> {
+        let (tx, rx) = mpsc::channel();
+        self.tx.send(Msg::Capture(tx)).ok()?;
+        rx.recv_timeout(wait).ok()
     }
 }
 
@@ -107,18 +137,23 @@ impl Drop for FramePipeline {
 
 fn worker(rx: Receiver<Msg>, gate: &CallbackGate, on_frame: impl Fn(Frame)) {
     let mut reader: Option<ShmReader> = None;
+    // The last frame delivered, and captures waiting for a readable frame.
+    let mut last: Option<(u32, u64)> = None;
+    let mut captures: Vec<Sender<Frame>> = Vec::new();
     loop {
         let Ok(first) = rx.recv() else { return };
         let mut newest: Option<(u32, u64)> = None;
         for msg in std::iter::once(first).chain(rx.try_iter()) {
             match msg {
                 Msg::Stop => return,
+                Msg::Capture(tx) => captures.push(tx),
                 // A segment can already be gone (sdframe unlinks a generation ~1 s after
                 // announcing the next): keep the current reader and wait for the next line.
                 Msg::Shm { name, slots, cap } => {
                     if let Ok(r) = ShmReader::open(&name, slots, cap) {
                         reader = Some(r);
                         newest = None; // earlier announcements belong to the old segment
+                        last = None;
                     }
                 }
                 Msg::Frame { slot, seq } => newest = Some((slot, seq)),
@@ -128,7 +163,17 @@ fn worker(rx: Receiver<Msg>, gate: &CallbackGate, on_frame: impl Fn(Frame)) {
         if let (Some(r), Some((slot, seq))) = (&reader, newest)
             && let Some(frame) = r.read(slot, seq)
         {
+            last = Some((slot, seq));
             gate.run(|| on_frame(frame));
+        }
+        // Overwritten since (None): leave the captures parked; the next frame answers them.
+        if !captures.is_empty()
+            && let (Some(r), Some((slot, seq))) = (&reader, last)
+            && let Some(frame) = r.read(slot, seq)
+        {
+            for tx in captures.drain(..) {
+                let _ = tx.send(frame.clone());
+            }
         }
     }
 }
@@ -198,6 +243,37 @@ mod tests {
             assert!(t0.elapsed() < W, "pipeline saw {} of {n} lines", p.lines_seen());
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn capture_copies_the_newest_frame_and_waits_when_overwritten() {
+        let n = shm_name("capture");
+        let w = ShmWriter::create(&n, 3, 16).unwrap();
+        let r = rig(false);
+        assert!(r.pipeline.capture(Duration::from_millis(100)).is_none(), "no frame read yet");
+
+        write_frame(&w, 2);
+        r.helper.send_line(&format!("{}\n{}", shm_line(&n, 16), frame_line(2)));
+        r.frames.recv_timeout(W).expect("first frame");
+        let c = r.pipeline.capture(W).expect("capture");
+        assert_eq!((c.seq, c.data[0]), (2, 2));
+
+        // sdframe laps the ring (seq 8 reuses slot 0) without announcing: the parked
+        // capture is answered by the next announced frame.
+        for seq in [4, 6, 8] {
+            write_frame(&w, seq);
+        }
+        let (tx, rx) = mpsc::channel();
+        let p = &r.pipeline;
+        std::thread::scope(|s| {
+            s.spawn(|| tx.send(p.capture(W)).unwrap());
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(rx.try_recv().is_err(), "a capture of an overwritten slot waits");
+            write_frame(&w, 10);
+            r.helper.send_line(&frame_line(10));
+            let c = rx.recv_timeout(W).unwrap().expect("capture after the next frame");
+            assert_eq!((c.seq, c.data[0]), (10, 10));
+        });
     }
 
     #[test]

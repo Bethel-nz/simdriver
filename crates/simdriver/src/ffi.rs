@@ -317,7 +317,7 @@ pub extern "C" fn sd_grid_rows(screen_w: f64, screen_h: f64, cols: u32) -> u32 {
     Grid::new((screen_w, screen_h), cols).rows
 }
 
-/// Centre of grid cell `name` (e.g. "C4": row C, column 4) in 0..1 of the screen,
+/// Centre of grid cell `name` (e.g. "C4": row C, column 4; rows skip E) in 0..1 of the screen,
 /// written to `*x` and `*y`. False (nothing written) for a name outside the grid or a
 /// NULL argument.
 #[unsafe(no_mangle)]

@@ -1,8 +1,12 @@
 //! A named grid over the screen, for targeting what accessibility does not expose
-//! (maps, canvases, games). Rows are letters down the screen — A, B, C… as many as
-//! the height needs for roughly square cells (…Z, AA, AB past 26) — and columns are
-//! numbers across: "C4" is the third row, fourth column. Coordinates are 0..1 of the
+//! (maps, canvases, games). Rows are letters down the screen — A, B, C, D, F… as many as
+//! the height needs for roughly square cells (…Z, AA, AB past 25) — and columns are
+//! numbers across: "C4" is the third row, fourth column. Rows skip E, so no cell name
+//! reads like an element ref (`e4`) in any capitalisation. Coordinates are 0..1 of the
 //! screen, the same space as [`crate::Driver::pointer`].
+
+/// Row letters: the alphabet without E.
+const LETTERS: &[u8; 25] = b"ABCDFGHIJKLMNOPQRSTUVWXYZ";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Grid {
@@ -54,10 +58,11 @@ impl Grid {
         if letters.is_empty() || !letters.chars().all(|c| c.is_ascii_alphabetic()) {
             return None;
         }
-        // Bijective base 26: A=1 … Z=26, AA=27.
+        // Bijective base 25 over LETTERS: A=1 … Z=25, AA=26.
         let mut row: u64 = 0;
-        for c in letters.chars() {
-            row = row * 26 + u64::from(c.to_ascii_uppercase() as u8 - b'A' + 1);
+        for c in letters.bytes() {
+            let digit = LETTERS.iter().position(|&l| l == c.to_ascii_uppercase())?;
+            row = row * 25 + digit as u64 + 1;
             if row > u64::from(u32::MAX) {
                 return None;
             }
@@ -71,11 +76,11 @@ impl Grid {
 fn row_letters(mut row: u32) -> String {
     let mut out = Vec::new();
     loop {
-        out.push(b'A' + (row % 26) as u8);
-        if row < 26 {
+        out.push(LETTERS[(row % 25) as usize]);
+        if row < 25 {
             break;
         }
-        row = row / 26 - 1;
+        row = row / 25 - 1;
     }
     out.reverse();
     String::from_utf8(out).expect("ascii")
@@ -90,27 +95,32 @@ mod tests {
         let g = Grid::new((402.0, 874.0), Grid::DEFAULT_COLS);
         assert_eq!(g, Grid { rows: 13, cols: 6 });
         assert_eq!(g.name(0, 0), "A1");
-        assert_eq!(g.name(12, 5), "M6");
+        assert_eq!(g.name(4, 0), "F1", "no row E");
+        assert_eq!(g.name(12, 5), "N6");
         assert_eq!(g.center("a1"), Some((1.0 / 12.0, 1.0 / 26.0)));
-        assert_eq!(g.center("M6"), Some((11.0 / 12.0, 25.0 / 26.0)));
-        assert_eq!(g.center("N1"), None, "row past the grid");
+        assert_eq!(g.center("N6"), Some((11.0 / 12.0, 25.0 / 26.0)));
+        assert_eq!(g.center("E1"), None, "E is never a row");
+        assert_eq!(g.center("e4"), None);
+        assert_eq!(g.center("O1"), None, "row past the grid");
         assert_eq!(g.center("A7"), None, "column past the grid");
         assert_eq!(g.center("A0"), None);
         assert_eq!(g.center("1A"), None);
         assert_eq!(g.center(""), None);
         assert_eq!(g.at(0.0, 0.0), "A1");
-        assert_eq!(g.at(1.0, 1.0), "M6");
-        assert_eq!(g.at(0.5, 0.5), "G4");
+        assert_eq!(g.at(1.0, 1.0), "N6");
+        assert_eq!(g.at(0.5, 0.5), "H4");
     }
 
     #[test]
     fn rows_past_z_go_on_as_aa() {
         let g = Grid::new((100.0, 3000.0), 3); // 90 rows
         assert_eq!(g.rows, 90);
-        assert_eq!(g.name(25, 0), "Z1");
-        assert_eq!(g.name(26, 0), "AA1");
-        assert_eq!(g.name(89, 2), "CL3");
-        for (r, c) in [(0, 0), (25, 1), (26, 2), (51, 0), (52, 1), (89, 2)] {
+        assert_eq!(g.name(24, 0), "Z1");
+        assert_eq!(g.name(25, 0), "AA1");
+        assert_eq!(g.name(29, 0), "AF1", "no E in later places either");
+        assert_eq!(g.name(89, 2), "CP3");
+        assert!((0..g.rows).all(|r| !g.name(r, 0).contains('E')));
+        for (r, c) in [(0, 0), (24, 1), (25, 2), (49, 0), (50, 1), (89, 2)] {
             let n = g.name(r, c);
             let (x, y) = g.center(&n).unwrap();
             assert_eq!(g.at(x, y), n);
