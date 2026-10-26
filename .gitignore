@@ -4,3 +4,4 @@ node_modules/
 *.node
 bindings/node/helpers/
 bindings/node/native.d.ts
+docs/superpowers/
