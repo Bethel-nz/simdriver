@@ -102,11 +102,6 @@ impl Router {
         Router { w: screen_pt.0, h: screen_pt.1, touch: None, pan: None, two: None }
     }
 
-    pub(crate) fn set_screen(&mut self, screen_pt: (f64, f64)) {
-        self.w = screen_pt.0;
-        self.h = screen_pt.1;
-    }
-
     fn cx(&self, x: f64) -> f64 {
         clamp(x, 0.0, self.w)
     }

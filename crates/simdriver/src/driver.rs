@@ -273,6 +273,21 @@ struct Inner {
 /// One live driver per UDID per process: starting another stops this one.
 static REGISTRY: Mutex<Vec<(String, Weak<Inner>)>> = Mutex::new(Vec::new());
 
+/// Starts for one UDID run one at a time, so two never spawn sdhid against the same
+/// device at once (the later connect would displace the earlier one's input).
+static STARTING: Mutex<Vec<(String, Arc<Mutex<()>>)>> = Mutex::new(Vec::new());
+
+fn start_lock(udid: &str) -> Arc<Mutex<()>> {
+    let mut all = lock(&STARTING);
+    all.retain(|(_, m)| Arc::strong_count(m) > 1); // drop locks nobody holds
+    if let Some((_, m)) = all.iter().find(|(u, _)| u == udid) {
+        return m.clone();
+    }
+    let m = Arc::new(Mutex::new(()));
+    all.push((udid.to_string(), m.clone()));
+    m
+}
+
 /// Remove and return the live drivers registered for `udid`.
 fn registry_take(udid: &str) -> Vec<Arc<Inner>> {
     let mut reg = lock(&REGISTRY);
@@ -353,14 +368,13 @@ impl Inner {
         }
     }
 
-    /// sdhid reported the screen size: (re)size the router, replay early input.
+    /// sdhid is ready (first time or after a restart): a fresh router, so a touch in
+    /// flight under the old sdhid is dropped rather than continued on one that never saw
+    /// it go down. Then replay early input.
     fn set_screen(&self, w: f64, h: f64) {
         let mut inp = lock(&self.input);
         inp.screen = Some((w, h));
-        match inp.router.as_mut() {
-            Some(r) => r.set_screen((w, h)),
-            None => inp.router = Some(Router::new((w, h))),
-        }
+        inp.router = Some(Router::new((w, h)));
         let early = std::mem::take(&mut inp.early);
         for raw in early {
             self.apply(&mut inp, raw);
@@ -654,6 +668,8 @@ impl Driver {
                 return Err(Error::HelperMissing(bin.clone()));
             }
         }
+        let starting = start_lock(&udid);
+        let _one_start = lock(&starting);
         for old in registry_take(&udid) {
             old.stop(); // its sdhid must let go before ours connects
         }
@@ -724,12 +740,7 @@ impl Driver {
             .map_err(|e| Error::Spawn(format!("supervisor thread: {e}")))?;
         *lock(&driver.inner.supervisor) = Some(handle);
         driver.inner.wait_startup(start_wait)?;
-        // A concurrent start for the same device may have registered meanwhile: last wins.
-        let others = registry_take(&driver.inner.udid);
         lock(&REGISTRY).push((driver.inner.udid.clone(), Arc::downgrade(&driver.inner)));
-        for o in others {
-            o.stop();
-        }
         Ok(driver)
     }
 
@@ -1127,6 +1138,58 @@ mod tests {
                 t2(Phase::Move, 196.5, 213.0, 196.5, 639.0),
                 t2(Phase::Up, 196.5, 213.0, 196.5, 639.0),
             ]
+        );
+    }
+
+    #[test]
+    fn concurrent_starts_for_one_device_leave_one_live() {
+        let rig = Rig::new("concurrent", true);
+        let logs: Vec<Log> = (0..3).map(|_| Log::default()).collect();
+        let drivers: Vec<Driver> = thread::scope(|s| {
+            let hs: Vec<_> = logs
+                .iter()
+                .map(|l| {
+                    let (frame, hid, l) = (rig.frame.clone(), rig.hid.clone(), l.clone());
+                    s.spawn(move || {
+                        Driver::start_with("fake-concurrent".into(), frame, hid, Box::new(move |e| l.push(e)), W)
+                            .unwrap()
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let live: Vec<_> = drivers.iter().filter(|d| d.state() == State::Live).collect();
+        assert_eq!(live.len(), 1, "{:?}", drivers.iter().map(|d| d.state()).collect::<Vec<_>>());
+        for d in drivers.iter().filter(|d| d.state() != State::Live) {
+            assert_eq!(d.state(), State::Stopped);
+        }
+        // Each start ran alone: every replaced driver saw Live before it was stopped.
+        for l in &logs {
+            assert!(l.states().contains(&State::Live), "{:?}", l.states());
+        }
+    }
+
+    #[test]
+    fn sdhid_restart_drops_the_touch_in_flight() {
+        let rig = Rig::new("inflight", true);
+        let log = Log::default();
+        let d = rig.start("fake-inflight", &log).unwrap();
+        log.wait_state(State::Live, 1);
+        d.pointer(Phase::Down, 0.5, 0.5, Modifiers::default());
+        rig.wait_hid_log(1);
+        d.inner.hid.send_raw_line(r#"{"t":"_exit","code":1}"#);
+        log.wait_state(State::Restarting, 1);
+        log.wait_state(State::Live, 2);
+        // The new sdhid never saw that finger go down: the rest of the drag is dropped.
+        d.pointer(Phase::Move, 0.6, 0.5, Modifiers::default());
+        d.pointer(Phase::Up, 0.6, 0.5, Modifiers::default());
+        d.pointer(Phase::Down, 0.25, 0.25, Modifiers::default());
+        d.pointer(Phase::Up, 0.25, 0.25, Modifiers::default());
+        let touch = |p, x: f64, y: f64| HidCmd::Touch { phase: p, x, y, edge: crate::protocol::Edge::None }.to_line();
+        let got = rig.wait_hid_log(3);
+        assert_eq!(
+            got,
+            vec![touch(Phase::Down, 196.5, 426.0), touch(Phase::Down, 98.25, 213.0), touch(Phase::Up, 98.25, 213.0)]
         );
     }
 

@@ -170,16 +170,27 @@ static SimDevice *findDevice(NSString *udid) {
 /// silently drops (observed in the reboot IT). On a device that is already fully up this
 /// returns immediately. Best effort: `xcrun` unavailable counts as done. No `-b`: that
 /// would boot a device that shut down after our Booted check, and booting is the host's call.
+/// No shell (argv only), and bounded: a bootstatus still waiting after
+/// kBootstatusTimeoutSecs is killed and we connect anyway rather than hang `start`.
+static const int64_t kBootstatusTimeoutSecs = 30;
+
 static BOOL waitBootstatus(NSString *udid) {
   NSString *dev = currentDeveloperDir();
   if (dev.length == 0) return YES;
-  FILE *pipe = popen(
-      [[NSString stringWithFormat:@"'%@/usr/bin/simctl' bootstatus '%@' 2>/dev/null", dev, udid] UTF8String],
-      "r");
-  if (pipe == NULL) return YES;
-  char line[256];
-  while (fgets(line, sizeof line, pipe) != NULL) {}
-  return pclose(pipe) == 0;
+  NSTask *task = [NSTask new];
+  task.executableURL = [NSURL fileURLWithPath:[dev stringByAppendingPathComponent:@"usr/bin/simctl"]];
+  task.arguments = @[ @"bootstatus", udid ];
+  task.standardInput = [NSFileHandle fileHandleWithNullDevice];
+  task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+  task.standardError = [NSFileHandle fileHandleWithNullDevice];
+  dispatch_semaphore_t done = dispatch_semaphore_create(0);
+  task.terminationHandler = ^(NSTask *t) { dispatch_semaphore_signal(done); };
+  if (![task launchAndReturnError:nil]) return YES;
+  if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, kBootstatusTimeoutSecs * NSEC_PER_SEC)) != 0) {
+    [task terminate];
+    return NO;
+  }
+  return task.terminationStatus == 0;
 }
 
 // ─── XPC connection to dtuhidd ───────────────────────────────────────────────
