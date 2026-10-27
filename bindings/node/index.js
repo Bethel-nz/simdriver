@@ -26,7 +26,7 @@ const modifiers = (mods) => ({
 
 // Agent refusals arrive as "code: message"; expose the code for hosts to branch on.
 const agentError = (e) => {
-  const m = /^(stale|covered|not-found|not-ready|invalid|device|not-text-input|commit-not-observed|clear-not-observed|keyboard-occludes): /.exec(e?.message ?? '');
+  const m = /^(stale|covered|not-found|ambiguous|not-ready|invalid|device|not-text-input|commit-not-observed|clear-not-observed|keyboard-occludes): /.exec(e?.message ?? '');
   if (m) e.code = m[1];
   return e;
 };
