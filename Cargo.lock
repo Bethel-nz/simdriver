@@ -1644,6 +1644,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "simdriver-cli"
+version = "0.1.2"
+dependencies = [
+ "serde",
+ "serde_json",
+ "simdriver",
+ "simdriver-agent",
+]
+
+[[package]]
 name = "simdriver-node"
 version = "0.1.2"
 dependencies = [

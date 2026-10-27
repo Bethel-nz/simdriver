@@ -72,6 +72,24 @@ const report = await agent.steps([
 Every action, option, and error code is listed in
 [`docs/simdriver-controls.md`](docs/simdriver-controls.md).
 
+## Quickstart: the command line
+
+`cargo run -p simdriver-cli --` (or install the `simdriver` binary) drives a booted
+simulator one command at a time — the agent layer, with its refs remembered between
+calls in `~/.cache/simdriver/`:
+
+```sh
+simdriver devices
+simdriver agent snapshot --image shot.png   # elements numbered e1, e2… + annotated shot
+simdriver agent tap e4                      # validated against the live screen first
+simdriver agent steps '[{"action":"tap","target":"Log in"},{"action":"waitFor","text":"Welcome"}]'
+simdriver set permission grant photos com.example.app
+simdriver reset app-data com.example.app
+```
+
+`--udid` picks the simulator (default: the only booted one), `--json` on the listing
+commands prints machine-readable output. Run `simdriver` with no arguments for everything.
+
 ## Quickstart: Electron
 
 `examples/electron` — driver in the main process, frames to the renderer over

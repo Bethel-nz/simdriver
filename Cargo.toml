@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/simdriver", "crates/simdriver-agent", "bindings/node", "examples/rust-minimal"]
+members = ["crates/simdriver", "crates/simdriver-agent", "crates/simdriver-cli", "bindings/node", "examples/rust-minimal"]
 
 [workspace.package]
 edition = "2024"

@@ -1,0 +1,19 @@
+[package]
+name = "simdriver-cli"
+description = "Drive an iOS simulator from the command line: see the screen, tap, type, run flows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme = "../../README.md"
+keywords = ["ios", "simulator", "automation", "agents", "cli"]
+categories = ["command-line-utilities", "development-tools::testing"]
+
+[[bin]]
+name = "simdriver"
+path = "src/main.rs"
+
+[dependencies]
+simdriver = { path = "../simdriver", version = "0.1.2" }
+simdriver-agent = { path = "../simdriver-agent", version = "0.1.2" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
