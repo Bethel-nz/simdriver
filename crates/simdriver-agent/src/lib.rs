@@ -816,13 +816,27 @@ impl<D: Device> Agent<D> {
         }
     }
 
-    /// Tap an element ref from the last snapshot (`e4`) or a grid cell (`C4`). A ref is
-    /// re-read just before the touch: refused if it vanished or moved, is covered, or —
-    /// with `expect` — its name no longer contains that text.
+    /// Tap an element by ref from the last snapshot (`e4`), by its label on screen
+    /// (`"Log in"`), or a grid cell (`C4`). A ref is re-read just before the touch:
+    /// refused if it vanished or moved, is covered, or — with `expect` — its name no
+    /// longer contains that text.
     pub fn tap(&self, target: &str, expect: Option<&str>) -> Result<Tapped, AgentError> {
-        let screen = self.screen()?;
         if is_ref(target) {
+            let screen = self.screen()?;
             return self.tap_ref(&target.to_ascii_lowercase(), expect, screen, None, false);
+        }
+        let screen = self.screen()?;
+        let (root, els, _, _) = self.settled(screen, SnapshotOptions::default().settle)?;
+        if let Some(el) = self.find(&els, target, false) {
+            if let Some(want) = expect
+                && !el.name().to_lowercase().contains(&want.to_lowercase())
+            {
+                return Err(AgentError::Stale(format!(
+                    "{target:?} is {:?}, not {want:?}",
+                    el.name()
+                )));
+            }
+            return self.touch(target, &el.clone(), root, screen, None, false);
         }
         let cols = lock(&self.last)
             .as_ref()
