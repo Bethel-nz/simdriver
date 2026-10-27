@@ -2,7 +2,7 @@
 //! on screen, numbered e1…eN in tree order, each with the point a tap would actually
 //! reach. Later elements in tree order draw on top (a floating search bar after the
 //! list it floats over), so an element is tapped where nothing after it covers it.
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use simdriver::AxNode;
 
 /// Roles an agent acts on.
@@ -35,7 +35,7 @@ const TEXT_INPUT: &[&str] = &[
 /// Samples across an element when its centre is covered (columns × rows).
 const SAMPLES: (u32, u32) = (7, 5);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Visibility {
     /// Nothing covers it.
@@ -46,7 +46,7 @@ pub enum Visibility {
     Covered,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Element {
     /// `e1`, `e2`… in this snapshot.
     #[serde(rename = "ref")]

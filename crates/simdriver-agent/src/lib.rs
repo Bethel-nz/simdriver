@@ -21,7 +21,7 @@ mod steps;
 pub use marks::{Element, Visibility};
 pub use steps::{Step, StepFailure, SwipeTarget};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use simdriver::{AxNode, Button, Driver, Frame, Grid};
 use std::collections::HashMap;
 use std::fmt;
@@ -412,7 +412,7 @@ impl Default for SnapshotOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     /// Elements e1…eN are the targets (grid cells work too).
@@ -421,13 +421,13 @@ pub enum Mode {
     Grid,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GridSize {
     pub rows: u32,
     pub cols: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     /// Increases with every snapshot; refs belong to the snapshot that made them.
@@ -556,10 +556,21 @@ fn changed(a: &[[u8; 3]], b: &[[u8; 3]]) -> f64 {
 }
 
 /// Every ref handed out: the last number, and what each ref named in which snapshot.
-#[derive(Default)]
-struct Refs {
-    count: u64,
-    issued: HashMap<String, (String, u64)>,
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+pub struct Refs {
+    pub count: u64,
+    pub issued: HashMap<String, (String, u64)>,
+}
+
+/// Everything a fresh process needs to keep using the refs an earlier one issued: the
+/// last snapshot (whose elements carry their refs), the ref ledger, and the snapshot
+/// counter. Serialize it, hand it to `Agent::restore`, and `e4` means what it meant.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentState {
+    pub last: Option<Snapshot>,
+    pub next_id: u64,
+    pub refs: Refs,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -621,6 +632,23 @@ impl<D: Device> Agent<D> {
     /// The latest snapshot, if any.
     pub fn last_snapshot(&self) -> Option<Snapshot> {
         lock(&self.last).clone()
+    }
+
+    /// The ref state to carry into another process (see `AgentState`).
+    pub fn state(&self) -> AgentState {
+        AgentState {
+            last: lock(&self.last).clone(),
+            next_id: self.next_id.load(Ordering::SeqCst),
+            refs: lock(&self.refs).clone(),
+        }
+    }
+
+    /// Continue from a state an earlier process saved. Refs it issued still resolve;
+    /// new snapshot ids continue after the restored ones.
+    pub fn restore(&self, state: AgentState) {
+        *lock(&self.last) = state.last;
+        *lock(&self.refs) = state.refs;
+        self.next_id.store(state.next_id, Ordering::SeqCst);
     }
 
     fn screen(&self) -> Result<(f64, f64), AgentError> {
