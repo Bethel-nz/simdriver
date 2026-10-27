@@ -332,6 +332,8 @@ pub enum AgentError {
     Covered(String),
     /// No such ref, label, cell, or awaited text.
     NotFound(String),
+    /// A label matches more than one element equally well: use a ref instead.
+    Ambiguous(String),
     /// No snapshot yet, or input not connected.
     NotReady(String),
     /// A malformed step (unknown key or button).
@@ -344,12 +346,13 @@ pub enum AgentError {
 }
 
 impl AgentError {
-    /// A stable short code: `stale`, `covered`, `not-found`, `not-ready`, `invalid`, `device`.
+    /// A stable short code: `stale`, `covered`, `not-found`, `ambiguous`, `not-ready`, `invalid`, `device`.
     pub fn code(&self) -> &'static str {
         match self {
             AgentError::Stale(_) => "stale",
             AgentError::Covered(_) => "covered",
             AgentError::NotFound(_) => "not-found",
+            AgentError::Ambiguous(_) => "ambiguous",
             AgentError::NotReady(_) => "not-ready",
             AgentError::Invalid(_) => "invalid",
             AgentError::NotTextInput(_) => "not-text-input",
@@ -367,6 +370,7 @@ impl fmt::Display for AgentError {
             AgentError::Stale(m)
             | AgentError::Covered(m)
             | AgentError::NotFound(m)
+            | AgentError::Ambiguous(m)
             | AgentError::NotReady(m)
             | AgentError::Invalid(m)
             | AgentError::NotTextInput(m) => write!(f, "{}: {m}", self.code()),
@@ -817,7 +821,9 @@ impl<D: Device> Agent<D> {
     }
 
     /// Tap an element by ref from the last snapshot (`e4`), by its label on screen
-    /// (`"Log in"`), or a grid cell (`C4`). A ref is re-read just before the touch:
+    /// (`"Log in"`), or a grid cell (`C4`). A label matching two reachable elements
+    /// equally well is refused as `ambiguous` — use the snapshot's ref instead. A ref
+    /// is re-read just before the touch:
     /// refused if it vanished or moved, is covered, or — with `expect` — its name no
     /// longer contains that text.
     pub fn tap(&self, target: &str, expect: Option<&str>) -> Result<Tapped, AgentError> {
@@ -827,7 +833,7 @@ impl<D: Device> Agent<D> {
         }
         let screen = self.screen()?;
         let (root, els, _, _) = self.settled(screen, SnapshotOptions::default().settle)?;
-        if let Some(el) = self.find(&els, target, false) {
+        if let Some(el) = self.find(&els, target, false)? {
             if let Some(want) = expect
                 && !el.name().to_lowercase().contains(&want.to_lowercase())
             {
@@ -984,7 +990,7 @@ impl<D: Device> Agent<D> {
         }
         let screen = self.screen()?;
         let (root, els, _, _) = self.settled(screen, SnapshotOptions::default().settle)?;
-        match self.find(&els, target, text_input) {
+        match self.find(&els, target, text_input)? {
             Some(el) => self.touch(target, &el.clone(), root, screen, hold, double),
             None if Grid::new(screen, Grid::DEFAULT_COLS)
                 .center(target)
@@ -1052,7 +1058,7 @@ impl<D: Device> Agent<D> {
         }
         let screen = self.screen()?;
         let (_, els, _, _) = self.settled(screen, SnapshotOptions::default().settle)?;
-        if let Some(el) = self.find(&els, target, false) {
+        if let Some(el) = self.find(&els, target, false)? {
             if !from_end {
                 // Dropping onto an element needs a point, which a covered element still has.
                 let f = el.frame;
@@ -1077,8 +1083,15 @@ impl<D: Device> Agent<D> {
     }
 
     /// The element a label, identifier or value names: exact over partial, reachable
-    /// first, text fields first for `fill`; of equal matches the first in tree order.
-    fn find<'a>(&self, els: &'a [Element], target: &str, text_input: bool) -> Option<&'a Element> {
+    /// first, text fields first for `fill`. Equal top-ranked matches are refused as
+    /// ambiguous — the caller must use a ref — so this never silently picks one of
+    /// several identical labels.
+    fn find<'a>(
+        &self,
+        els: &'a [Element],
+        target: &str,
+        text_input: bool,
+    ) -> Result<Option<&'a Element>, AgentError> {
         let want = target.to_lowercase();
         let rank = |e: &Element| {
             let names = [
@@ -1100,10 +1113,49 @@ impl<D: Device> Agent<D> {
             };
             (score, e.tap.is_some(), !text_input || e.takes_text())
         };
-        els.iter()
-            .rev()
-            .filter(|e| rank(e).0 > 0)
-            .max_by_key(|e| rank(e))
+        let mut best: Option<&'a Element> = None;
+        let mut best_rank = (0, false, false);
+        let mut tied: Vec<&'a Element> = Vec::new();
+        for e in els {
+            let r = rank(e);
+            if r.0 == 0 {
+                continue;
+            }
+            if best.is_none_or(|_| r > best_rank) {
+                best = Some(e);
+                best_rank = r;
+                tied.clear();
+                tied.push(e);
+            } else if r == best_rank {
+                tied.push(e);
+            }
+        }
+        let Some(found) = best else {
+            return Ok(None);
+        };
+        if tied.len() > 1 {
+            let list = tied
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{} {} {:?} at [{:.0}, {:.0}, {:.0}, {:.0}]",
+                        e.reference,
+                        e.role,
+                        e.name(),
+                        e.frame[0],
+                        e.frame[1],
+                        e.frame[2],
+                        e.frame[3]
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(AgentError::Ambiguous(format!(
+                "{target:?} matches {} elements ({list}); take a snapshot and use its ref",
+                tied.len()
+            )));
+        }
+        Ok(Some(found))
     }
 
     fn field_value(
@@ -1166,7 +1218,7 @@ impl<D: Device> Agent<D> {
                 .ok_or_else(|| AgentError::Stale(format!("{target} is no longer on screen")));
         }
         let (_, els, _, _) = self.settled(screen, SnapshotOptions::default().settle)?;
-        if let Some(e) = self.find(&els, target, false) {
+        if let Some(e) = self.find(&els, target, false)? {
             return Ok(e.frame);
         }
         let cols = lock(&self.last)
@@ -1197,7 +1249,7 @@ impl<D: Device> Agent<D> {
                 .cloned()
         } else {
             let (_, els, _, _) = self.settled(screen, SnapshotOptions::default().settle)?;
-            self.find(&els, target, false).cloned()
+            self.find(&els, target, false)?.cloned()
         }
         .ok_or_else(|| AgentError::NotFound(format!("nothing on screen is called {target:?}")))?;
         if !field.takes_text() {
@@ -1302,7 +1354,7 @@ impl<D: Device> Agent<D> {
                     Some(t) => {
                         let (_, els, _, _) =
                             self.settled(screen, SnapshotOptions::default().settle)?;
-                        let el = self.find(&els, t, false).ok_or_else(|| {
+                        let el = self.find(&els, t, false)?.ok_or_else(|| {
                             AgentError::NotFound(format!("nothing on screen is called {t:?}"))
                         })?;
                         el.frame
@@ -2971,5 +3023,42 @@ mod tests {
                 .error
                 .starts_with("not-found: \"never\" did not appear within 0.2 s")
         );
+    }
+
+    #[test]
+    fn duplicate_labels_are_ambiguous_until_a_ref_picks_one() {
+        let dupes = node(
+            "AXApplication",
+            "App",
+            [0.0, 0.0, 400.0, 800.0],
+            vec![
+                node("AXButton", "Edit", [20.0, 200.0, 360.0, 50.0], vec![]),
+                node("AXButton", "Edit", [20.0, 300.0, 360.0, 50.0], vec![]),
+            ],
+        );
+        let a = Agent::new(Fake::new(dupes));
+        a.snapshot(&quick()).unwrap();
+        match a.tap("Edit", None) {
+            Err(AgentError::Ambiguous(m)) => {
+                assert!(m.contains("\"Edit\" matches 2 elements"), "{m}")
+            }
+            other => panic!("expected ambiguous, got {other:?}"),
+        }
+        assert!(lock(&a.device.taps).is_empty(), "nothing tapped");
+        // A ref disambiguates.
+        let t = a.tap("e2", None).unwrap();
+        assert_eq!(t.at, [200.0, 325.0]);
+        // Exact still beats partial; reachable still beats covered.
+        let varied = node(
+            "AXApplication",
+            "App",
+            [0.0, 0.0, 400.0, 800.0],
+            vec![
+                node("AXButton", "Edit photo", [20.0, 200.0, 360.0, 50.0], vec![]),
+                node("AXButton", "Edit", [20.0, 300.0, 360.0, 50.0], vec![]),
+            ],
+        );
+        let b = Agent::new(Fake::new(varied));
+        assert_eq!(b.tap("Edit", None).unwrap().at, [200.0, 325.0]);
     }
 }
