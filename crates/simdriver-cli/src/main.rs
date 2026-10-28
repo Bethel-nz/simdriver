@@ -28,7 +28,9 @@ The screen, through the agent layer:
       <dur> is 5s, 1.5s, 800ms or a bare number of ms (default 5s, at most 30s).
       Writes sheet-N.png, frame-<n>-<t>ms.png and record.json to --out (default
       ~/.cache/simdriver/records/<udid>-<time>/); the report on stdout lists them.
-      A steps run whose first step is `record` is recorded the same way.
+      An --out that cannot be written is refused before the simulator is touched; if a
+      write still fails, the recording goes to a temporary directory instead (exit 1).
+      A steps run whose first step is `record` is recorded the same way (same --out).
 
 Apps and simulator state:
   launch <bundle> | terminate <bundle> | open-url <url>
@@ -443,7 +445,18 @@ fn agent_command(rest: &[String]) -> Result<(), CliError> {
             let udid = pick_booted(args.flag("--udid"))?;
             let input = args.word(0, "a JSON array of steps, or @file")?;
             let steps = parse_steps_input(&input)?;
-            let out = args.flag("--out").map(PathBuf::from);
+            // Only a run that records writes files; a misplaced `record` fails the run.
+            let records = steps
+                .first()
+                .is_some_and(|s| matches!(s, Step::Record { .. }));
+            let out = if records {
+                Some(prepare_record_dir(
+                    args.flag("--out").map(std::path::Path::new),
+                    &udid,
+                )?)
+            } else {
+                None
+            };
             let driver = start_driver(&udid)?;
             let agent = Agent::new(driver);
             if !args.bool("--fresh") {
@@ -473,8 +486,11 @@ fn agent_command(rest: &[String]) -> Result<(), CliError> {
             }
             let opts = record_options(&args)?;
             let steps = parse_record_tail(tail)?;
-            let out = args.flag("--out").map(PathBuf::from);
             let udid = pick_booted(args.flag("--udid"))?;
+            let out = Some(prepare_record_dir(
+                args.flag("--out").map(std::path::Path::new),
+                &udid,
+            )?);
             let driver = start_driver(&udid)?;
             let agent = Agent::new(driver);
             if !args.bool("--fresh") {
@@ -624,60 +640,166 @@ fn default_record_dir(udid: &str) -> Result<PathBuf, CliError> {
         .join(format!("{}-{}", udid_short(udid), unix_ms())))
 }
 
-/// Save state, write screenshots and any recording, print the report, stop the driver,
-/// and turn a failed run into an error.
+/// Where a recording goes when its directory cannot be written:
+/// `<tmp>/simdriver-record-<udid>-<unix_ms>/`.
+fn fallback_record_dir(udid: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "simdriver-record-{}-{}",
+        udid_short(udid),
+        unix_ms()
+    ))
+}
+
+/// A recording's directory, ready before the run.
+#[derive(Debug)]
+struct RecordDir {
+    /// Absolute.
+    path: PathBuf,
+    /// It did not exist before (so an unused one can be removed again).
+    created: bool,
+}
+
+/// The recording's directory (`out`, or the default), created and proven writable before
+/// the driver starts, so a bad `--out` costs nothing on the simulator.
+fn prepare_record_dir(out: Option<&std::path::Path>, udid: &str) -> Result<RecordDir, CliError> {
+    let dir = match out {
+        Some(path) if path.as_os_str().is_empty() => {
+            return Err(CliError::Usage("--out needs a directory".into()));
+        }
+        Some(path) => path.to_path_buf(),
+        None => default_record_dir(udid)?,
+    };
+    let refuse = |e: &dyn std::fmt::Display| {
+        CliError::Fail(format!(
+            "cannot write the recording to {}: {e}",
+            dir.display()
+        ))
+    };
+    let existed = dir.exists();
+    if existed && !dir.is_dir() {
+        return Err(refuse(&"it exists and is not a directory"));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| refuse(&e))?;
+    let probe = dir.join(format!(".simdriver-probe-{}", std::process::id()));
+    std::fs::write(&probe, b"").map_err(|e| refuse(&e))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(RecordDir {
+        path: std::path::absolute(&dir).map_err(|e| refuse(&e))?,
+        created: !existed,
+    })
+}
+
+/// Write the recording into `target`; if that fails, into `fallback` instead, so a
+/// recording is never lost to a write failure. `None` when `target` took it; otherwise
+/// the error, saying where it was written (or that it could not be written at all, with
+/// no file paths left on the recording).
+fn save_recording(
+    target: &std::path::Path,
+    fallback: &std::path::Path,
+    recording: &mut Recording,
+) -> Option<String> {
+    let Err(first) = write_recording(target, recording) else {
+        return None;
+    };
+    let first = format!(
+        "could not write the recording to {}: {}",
+        target.display(),
+        message(first)
+    );
+    match write_recording(fallback, recording) {
+        Ok(()) => Some(format!(
+            "{first}; wrote it to {} instead",
+            fallback.display()
+        )),
+        Err(second) => {
+            recording.sheet_files.clear();
+            for frame in &mut recording.frames {
+                frame.file = None;
+            }
+            Some(format!(
+                "{first}; nor to {}: {}",
+                fallback.display(),
+                message(second)
+            ))
+        }
+    }
+}
+
+fn message(e: CliError) -> String {
+    match e {
+        CliError::Usage(m) | CliError::Fail(m) => m,
+    }
+}
+
+/// Save state, write any recording (first, so nothing below can lose it), then any
+/// screenshots, print the report, stop the driver, and turn a failed run into an error.
 fn finish_run(
     agent: &Agent<sd::Driver>,
     udid: &str,
     mut report: StepsReport,
-    out: Option<PathBuf>,
+    out: Option<RecordDir>,
 ) -> Result<(), CliError> {
     save_state(agent, udid);
-    let dir = state_dir()?;
-    let mut write_error = None;
+    let mut errors: Vec<String> = Vec::new();
     if let Some(recording) = report.record.as_mut() {
-        let target = match out {
-            Some(path) => Ok(path),
-            None => default_record_dir(udid),
-        };
-        if let Err(e) = target.and_then(|d| write_recording(&d, recording)) {
-            write_error = Some(e);
-        }
+        let fallback = fallback_record_dir(udid);
+        let target = out.map_or_else(|| fallback.clone(), |d| d.path);
+        errors.extend(save_recording(&target, &fallback, recording));
+    } else if let Some(dir) = out.filter(|d| d.created) {
+        // Made for a recording that never started: remove it again if still empty.
+        let _ = std::fs::remove_dir(dir.path);
     }
     let mut value = serde_json::to_value(&report)?;
-    if let Some(shots) = value.get_mut("screenshots").and_then(|v| v.as_array_mut()) {
-        for (index, (shot, taken)) in shots.iter_mut().zip(&report.screenshots).enumerate() {
-            let path = dir.join(format!(
-                "shot-{}-{index}-{}.png",
-                udid_short(udid),
-                taken.target.replace(['/', ' ', '"'], "_")
-            ));
-            std::fs::write(&path, &taken.png)?;
-            shot["png"] = serde_json::Value::String(path.to_string_lossy().into());
+    if !report.screenshots.is_empty() {
+        match state_dir() {
+            Ok(dir) => {
+                if let Some(shots) = value.get_mut("screenshots").and_then(|v| v.as_array_mut()) {
+                    for (index, (shot, taken)) in
+                        shots.iter_mut().zip(&report.screenshots).enumerate()
+                    {
+                        let path = dir.join(format!(
+                            "shot-{}-{index}-{}.png",
+                            udid_short(udid),
+                            taken.target.replace(['/', ' ', '"'], "_")
+                        ));
+                        match std::fs::write(&path, &taken.png) {
+                            Ok(()) => {
+                                shot["png"] =
+                                    serde_json::Value::String(path.to_string_lossy().into());
+                            }
+                            Err(e) => {
+                                errors.push(format!("could not write {}: {e}", path.display()));
+                                shot["png"] = serde_json::Value::Null;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                errors.push(format!("could not write the screenshots: {}", message(e)));
+                if let Some(shots) = value.get_mut("screenshots").and_then(|v| v.as_array_mut()) {
+                    for shot in shots {
+                        shot["png"] = serde_json::Value::Null;
+                    }
+                }
+            }
         }
     }
     println!("{}", serde_json::to_string_pretty(&value)?);
     agent.device().stop();
-    if let Some(e) = write_error {
-        return Err(e);
+    if let Some(f) = report.failed.as_ref().filter(|_| !report.ok) {
+        errors.push(format!("step {} failed: {}", f.index, f.error));
     }
-    if !report.ok {
-        return Err(CliError::Fail(format!(
-            "step {} failed: {}",
-            report.failed.as_ref().map(|f| f.index).unwrap_or(0),
-            report
-                .failed
-                .as_ref()
-                .map(|f| f.error.clone())
-                .unwrap_or_default()
-        )));
-    }
-    match &report.record {
-        Some(recording) if recording.ended == Ended::Error => Err(CliError::Fail(format!(
+    if let Some(recording) = report.record.as_ref().filter(|r| r.ended == Ended::Error) {
+        errors.push(format!(
             "the recording ended in error: {}",
             recording.error.clone().unwrap_or_default()
-        ))),
-        _ => Ok(()),
+        ));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(CliError::Fail(errors.join("\n")))
     }
 }
 
@@ -907,6 +1029,107 @@ mod tests {
                 .ends_with("frame-01-250ms.png")
         );
         assert_eq!(second.sheet_files, [sheet.to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "simdriver-cli-test-{name}-{}-{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn one_frame(byte: u8) -> Recording {
+        test_recording(
+            byte,
+            vec![simdriver_agent::RecordedFrame {
+                index: 0,
+                t_ms: 0,
+                change: 0.0,
+                png: vec![byte],
+                file: None,
+            }],
+        )
+    }
+
+    #[test]
+    fn unwritable_out_is_refused_before_the_driver_starts() {
+        // `prepare_record_dir` runs before `start_driver`; it touches only the file system.
+        let dir = scratch("prepare");
+        let file = dir.join("a-file");
+        std::fs::write(&file, "x").unwrap();
+        for bad in [file.clone(), file.join("below")] {
+            match prepare_record_dir(Some(&bad), "ABCDEF12-0000") {
+                Err(CliError::Fail(m)) => assert!(m.contains("cannot write the recording"), "{m}"),
+                other => panic!("{bad:?}: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            prepare_record_dir(Some(std::path::Path::new("")), "x"),
+            Err(CliError::Usage(_))
+        ));
+        // A directory without write permission (root could write anyway: skip then).
+        let locked = dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::write(locked.join("probe"), "").is_err() {
+            assert!(prepare_record_dir(Some(&locked), "x").is_err());
+            assert!(prepare_record_dir(Some(&locked.join("sub")), "x").is_err());
+        }
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A good one is created, absolute, empty (the probe is gone), and marked created.
+        let fresh = dir.join("nested").join("rec");
+        let ready = prepare_record_dir(Some(&fresh), "x").unwrap();
+        assert!(ready.path.is_absolute() && ready.path.is_dir() && ready.created);
+        assert_eq!(std::fs::read_dir(&ready.path).unwrap().count(), 0);
+        // An existing one is reused, not marked created.
+        assert!(!prepare_record_dir(Some(&fresh), "x").unwrap().created);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_write_falls_back_to_a_temp_dir() {
+        let dir = scratch("fallback");
+        // The target became a file after it was prepared: writing there fails.
+        let target = dir.join("target");
+        std::fs::write(&target, "x").unwrap();
+        let fallback = dir.join("fallback");
+        let mut rec = one_frame(7);
+        let error = save_recording(&target, &fallback, &mut rec).expect("an error");
+        assert!(error.contains(&target.display().to_string()), "{error}");
+        assert!(
+            error.contains(&format!("wrote it to {} instead", fallback.display())),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(fallback.join("sheet-1.png")).unwrap(), [7]);
+        assert_eq!(
+            std::fs::read(fallback.join("frame-00-0ms.png")).unwrap(),
+            [7]
+        );
+        assert!(fallback.join("record.json").is_file());
+        assert!(rec.sheet_files[0].starts_with(&*fallback.to_string_lossy()));
+        assert!(
+            rec.frames[0]
+                .file
+                .as_deref()
+                .is_some_and(|f| f.starts_with(&*fallback.to_string_lossy()))
+        );
+
+        // A good target takes it: no error, nothing in the fallback.
+        let good = dir.join("good");
+        let unused = dir.join("unused");
+        assert_eq!(save_recording(&good, &unused, &mut one_frame(1)), None);
+        assert!(good.join("record.json").is_file() && !unused.exists());
+
+        // Both fail: the error says so and no path is left pointing at a missing file.
+        let mut rec = one_frame(3);
+        let error = save_recording(&target, &target.join("sub"), &mut rec).expect("an error");
+        assert!(error.contains("nor to"), "{error}");
+        assert!(rec.sheet_files.is_empty() && rec.frames[0].file.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
