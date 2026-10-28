@@ -12,13 +12,16 @@
 //! The caller marks [`actions_started`](Recorder::actions_started) /
 //! [`actions_ended`](Recorder::actions_ended) around its steps (no marks: the actions
 //! "ended" at `t = 0`). Every ≤ 10 ms the collector checks for the end, with
-//! `due = t0 + time` and `quiet = max(action end, last frame arrival or t0)`:
+//! `due = t0 + time` and `quiet = max(action end, last frame arrival or t0)`. Actions
+//! still running at `due` keep it going until they end (`extended`); then it ends the
+//! normal way, with the time clock restarted at the action end so a screen that never
+//! stills cannot run on:
 //!
-//! | ends | when |
+//! | ends | when (actions ended) |
 //! |---|---|
-//! | `Idle` | not `full`, actions ended, nothing arrived for `idle` since `quiet` |
-//! | `Time` | not `full`: actions ended and `now ≥ due`; `full`: `now ≥ max(due, action end)` |
-//! | extension | actions still running at `due` keep it going (`extended`) until they end |
+//! | `Idle` | not `full`: nothing arrived for `idle` since `quiet` |
+//! | `Time` | not `full`: `now ≥ due`, or `now ≥ action end + time` if extended |
+//! | `Time` | `full`: `now ≥ max(due, action end)` (at once when extended) |
 //! | `StepFailed` | `idle` after [`step_failed`](Recorder::step_failed) (a tail of what followed) |
 //! | `Error` | the tap closed (the pipeline went away): "the frame stream ended" |
 //!
@@ -457,7 +460,10 @@ fn thin_victim(ts: &[Instant]) -> Option<usize> {
     (1..ts.len().saturating_sub(1)).min_by_key(|&i| ts[i + 1].saturating_duration_since(ts[i - 1]))
 }
 
-/// The end condition reached at `now`, if any (see the module docs).
+/// The end condition reached at `now`, if any (see the module docs). Nothing ends while
+/// actions run (bar a failed step's tail). Once they end, `full` stops at
+/// `max(due, action end)`; otherwise a still `idle` ends it, or the time: `due`, or
+/// `action end + time` when the actions outran `due` (the extension restarts the clock).
 fn end_rule(
     m: &Marks,
     t0: Instant,
@@ -478,9 +484,14 @@ fn end_rule(
         return (now >= due.max(action_end)).then_some(Ended::Time);
     }
     let quiet = action_end.max(last_arrival.unwrap_or(t0));
+    let time_up = if action_end > due {
+        action_end.checked_add(opts.time).unwrap_or(action_end)
+    } else {
+        due
+    };
     if now.saturating_duration_since(quiet) >= opts.idle {
         Some(Ended::Idle)
-    } else if now >= due {
+    } else if now >= time_up {
         Some(Ended::Time)
     } else {
         None
@@ -661,13 +672,100 @@ mod tests {
         thread::sleep(300 * MS);
         rec.actions_ended();
         let r = rec.finish(&fake);
-        // Idle (50 ms) passed long before: the idle clock starts at the actions' end.
-        assert_eq!(r.ended, Ended::Time);
+        // Idle (50 ms) passed long before: the idle clock starts at the actions' end, and
+        // the extended recording ends the normal way, after a still tail.
+        assert_eq!(r.ended, Ended::Idle);
         assert!(r.extended);
         assert_eq!(r.requested_ms, 100);
-        assert!((300..900).contains(&r.duration_ms), "{}", r.duration_ms);
+        let end = r.action_end_ms.unwrap();
+        assert!(end >= 300);
+        assert!(
+            (end + 50..end + 150).contains(&r.duration_ms),
+            "{} vs {end}",
+            r.duration_ms
+        );
         assert!(r.action_start_ms.unwrap() < 50);
-        assert!(r.action_end_ms.unwrap() >= 300);
+        assert_eq!(r.settled_ms, Some(0));
+    }
+
+    /// Feeds a distinct frame every 10 ms until `until` after `from`.
+    fn feed_until(fake: &Fake, from: Instant, until: Duration) {
+        let mut i = 1;
+        while from.elapsed() < until {
+            fake.feed(Instant::now(), distinct(i));
+            i += 1;
+            thread::sleep(10 * MS);
+        }
+    }
+
+    #[test]
+    fn extended_recording_waits_for_still() {
+        // Time 250 (not 100): the extension's clock runs from the actions' end (300 ms)
+        // for `time`, and must outlast the frames (to ~450 ms) for the idle end to show.
+        let fake = device();
+        let r = thread::scope(|s| {
+            let rec = start(&fake, opts(250, 50));
+            let began = Instant::now();
+            rec.actions_started();
+            let feeder = &fake;
+            s.spawn(move || feed_until(feeder, began, 450 * MS));
+            thread::sleep(300 * MS);
+            rec.actions_ended();
+            rec.finish(&fake)
+        });
+        assert_eq!(r.ended, Ended::Idle);
+        assert!(r.extended);
+        assert!(r.duration_ms >= 450, "{}", r.duration_ms);
+        assert!(r.settled_ms.is_some());
+    }
+
+    #[test]
+    fn extended_never_still_ends_at_action_end_plus_time() {
+        let fake = device();
+        let r = thread::scope(|s| {
+            let rec = start(&fake, opts(100, 50));
+            let began = Instant::now();
+            rec.actions_started();
+            let feeder = &fake;
+            s.spawn(move || feed_until(feeder, began, 900 * MS));
+            thread::sleep(200 * MS);
+            rec.actions_ended();
+            rec.finish(&fake)
+        });
+        assert_eq!(r.ended, Ended::Time);
+        assert!(r.extended);
+        let end = r.action_end_ms.unwrap();
+        assert!(end >= 200);
+        assert!(
+            (end + 100..end + 300).contains(&r.duration_ms),
+            "{} vs {end}",
+            r.duration_ms
+        );
+        assert_eq!(r.settled_ms, None);
+    }
+
+    #[test]
+    fn extended_full_stops_at_action_end() {
+        let fake = device();
+        let o = RecordOptions {
+            full: true,
+            ..opts(100, 50)
+        };
+        let rec = start(&fake, o);
+        rec.actions_started();
+        thread::sleep(300 * MS);
+        rec.actions_ended();
+        let r = rec.finish(&fake);
+        assert_eq!(r.ended, Ended::Time);
+        assert!(r.extended);
+        let end = r.action_end_ms.unwrap();
+        assert!(end >= 300);
+        // At once: no idle tail (50 ms), no second `time` (100 ms).
+        assert!(
+            (end..end + 40).contains(&r.duration_ms),
+            "{} vs {end}",
+            r.duration_ms
+        );
     }
 
     #[test]
