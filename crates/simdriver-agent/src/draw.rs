@@ -67,16 +67,52 @@ impl Canvas {
         let x = x.min(self.w as i64 - tw - 2 * pad).max(0);
         let y = y.min(self.h as i64 - th - 2 * pad).max(0);
         self.fill(x, y, x + tw + 2 * pad, y + th + 2 * pad, c, 256);
+        self.text(x + pad, y + pad, text, s, [255, 255, 255]);
+    }
+
+    /// `text` in the 5×7 font at scale `s`, its top-left at (x, y).
+    fn text(&mut self, x: i64, y: i64, text: &str, s: i64, c: [u8; 3]) {
         for (i, ch) in text.chars().enumerate() {
-            let rows = glyph(ch);
-            for (r, bits) in rows.iter().enumerate() {
+            for (r, bits) in glyph(ch).iter().enumerate() {
                 for b in 0..5 {
                     if bits & (0x10 >> b) != 0 {
-                        let gx = x + pad + i as i64 * 6 * s + b * s;
-                        let gy = y + pad + r as i64 * s;
-                        self.fill(gx, gy, gx + s, gy + s, [255, 255, 255], 256);
+                        let gx = x + i as i64 * 6 * s + b * s;
+                        let gy = y + r as i64 * s;
+                        self.fill(gx, gy, gx + s, gy + s, c, 256);
                     }
                 }
+            }
+        }
+    }
+
+    /// `f` scaled to `w`×`h` by area averaging (each destination pixel is the mean of
+    /// the source pixels it covers), top-left at (x0, y0).
+    fn blit_scaled(&mut self, f: &Frame, x0: i64, y0: i64, w: usize, h: usize) {
+        let (sw, sh) = (f.width as usize, f.height as usize);
+        for dy in 0..h {
+            let (ya, yb) = (
+                dy * sh / h,
+                ((dy + 1) * sh / h).max(dy * sh / h + 1).min(sh),
+            );
+            for dx in 0..w {
+                let (xa, xb) = (
+                    dx * sw / w,
+                    ((dx + 1) * sw / w).max(dx * sw / w + 1).min(sw),
+                );
+                let mut sum = [0u32; 3];
+                for y in ya..yb {
+                    for p in f.data[(y * sw + xa) * 4..(y * sw + xb) * 4]
+                        .as_chunks::<4>()
+                        .0
+                    {
+                        sum[0] += u32::from(p[2]);
+                        sum[1] += u32::from(p[1]);
+                        sum[2] += u32::from(p[0]);
+                    }
+                }
+                let n = ((yb - ya) * (xb - xa)) as u32;
+                let c = [(sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8];
+                self.blend(x0 + dx as i64, y0 + dy as i64, c, 256);
             }
         }
     }
@@ -170,7 +206,109 @@ pub fn crop(frame: &Frame, screen: (f64, f64), rect: [f64; 4]) -> Option<Vec<u8>
     Some(out)
 }
 
-/// 5×7 glyphs (row bits, MSB left) for refs and cell names: 0-9, A-Z, e.
+/// Where a tile sits relative to the recorded actions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TilePhase {
+    Before,
+    During,
+    After,
+}
+
+/// One frame of a contact sheet with its caption (e.g. `#4 +250ms`).
+pub struct Tile<'a> {
+    pub frame: &'a Frame,
+    pub label: String,
+    pub phase: TilePhase,
+}
+
+/// No sheet edge exceeds this, so a model reads the image at full size.
+const SHEET_MAX: usize = 1568;
+const TILE_W: usize = 180;
+const GUTTER: usize = 8;
+const BORDER: usize = 3;
+/// Label strip under each tile: 7 rows at scale 2, plus padding.
+const LABEL_H: usize = 20;
+const LABEL_SCALE: i64 = 2;
+const SHEET_BG: [u8; 3] = [24, 24, 24];
+const PHASE_BEFORE: [u8; 3] = [140, 140, 140];
+const PHASE_DURING: [u8; 3] = [41, 121, 255];
+const PHASE_AFTER: [u8; 3] = [0, 200, 83];
+
+fn phase_color(p: TilePhase) -> [u8; 3] {
+    match p {
+        TilePhase::Before => PHASE_BEFORE,
+        TilePhase::During => PHASE_DURING,
+        TilePhase::After => PHASE_AFTER,
+    }
+}
+
+/// The frame at full resolution, as a PNG.
+pub fn frame_png(frame: &Frame) -> Vec<u8> {
+    Canvas::from_frame(frame).png()
+}
+
+/// Tiles laid out left to right, top to bottom on sheets of at most 1568 px per edge.
+/// Tiles are 180 px wide (height by their own aspect); when they do not all fit, the
+/// overflow goes on another sheet rather than shrinking.
+pub fn contact_sheet(tiles: &[Tile]) -> Vec<Vec<u8>> {
+    let cell_w = TILE_W + 2 * BORDER;
+    let cols = ((SHEET_MAX - GUTTER) / (cell_w + GUTTER)).max(1);
+    // Tile image height by aspect, capped so one cell always fits a sheet.
+    let max_img = SHEET_MAX - 2 * GUTTER - 2 * BORDER - LABEL_H;
+    let img_h = |t: &Tile| {
+        let f = t.frame;
+        (TILE_W * f.height as usize / (f.width as usize).max(1)).clamp(1, max_img)
+    };
+    // Rows of up to `cols` tiles; a row's height is its tallest cell.
+    let rows: Vec<&[Tile]> = tiles.chunks(cols).collect();
+    let row_h = |r: &[Tile]| r.iter().map(img_h).max().unwrap_or(0) + 2 * BORDER + LABEL_H;
+    // Pack rows into sheets.
+    let mut sheets: Vec<Vec<&[Tile]>> = Vec::new();
+    let mut used = GUTTER;
+    for r in rows {
+        let h = row_h(r) + GUTTER;
+        match sheets.last_mut() {
+            Some(s) if used + h <= SHEET_MAX => {
+                s.push(r);
+                used += h;
+            }
+            _ => {
+                sheets.push(vec![r]);
+                used = GUTTER + h;
+            }
+        }
+    }
+    sheets
+        .iter()
+        .map(|rows| {
+            let n = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+            let w = GUTTER + n * (cell_w + GUTTER);
+            let h = GUTTER + rows.iter().map(|r| row_h(r) + GUTTER).sum::<usize>();
+            let mut c = Canvas {
+                w,
+                h,
+                px: SHEET_BG.repeat(w * h),
+            };
+            let mut y = GUTTER;
+            for r in rows {
+                for (i, t) in r.iter().enumerate() {
+                    let x = GUTTER + i * (cell_w + GUTTER);
+                    let ih = img_h(t);
+                    let (bx, by) = (x as i64, y as i64);
+                    let (bx1, by1) = (bx + cell_w as i64, by + (ih + 2 * BORDER) as i64);
+                    c.blit_scaled(t.frame, bx + BORDER as i64, by + BORDER as i64, TILE_W, ih);
+                    c.outline(bx, by, bx1, by1, BORDER as i64, phase_color(t.phase));
+                    let ty = by1 + (LABEL_H as i64 - 7 * LABEL_SCALE) / 2;
+                    c.text(bx, ty, &t.label, LABEL_SCALE, [255, 255, 255]);
+                }
+                y += row_h(r) + GUTTER;
+            }
+            c.png()
+        })
+        .collect()
+}
+
+/// 5×7 glyphs (row bits, MSB left) for refs, cell names and sheet labels: 0-9, A-Z, e, m, s, space, # + -.
 fn glyph(c: char) -> [u8; 7] {
     match c {
         '0' => [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
@@ -210,6 +348,12 @@ fn glyph(c: char) -> [u8; 7] {
         'Y' => [0x11, 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04],
         'Z' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
         'e' => [0x00, 0x00, 0x0E, 0x11, 0x1F, 0x10, 0x0E],
+        'm' => [0x00, 0x00, 0x1A, 0x15, 0x15, 0x15, 0x15],
+        's' => [0x00, 0x00, 0x0F, 0x10, 0x0E, 0x01, 0x1E],
+        '#' => [0x0A, 0x0A, 0x1F, 0x0A, 0x1F, 0x0A, 0x0A],
+        '+' => [0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00],
+        '-' => [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
+        ' ' => [0; 7],
         _ => [0x1F, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1F],
     }
 }
@@ -282,8 +426,87 @@ mod tests {
     #[test]
     fn every_ref_and_cell_character_has_a_glyph() {
         let unknown = glyph('?');
-        for ch in ('0'..='9').chain('A'..='Z').chain(['e']) {
+        for ch in ('0'..='9')
+            .chain('A'..='Z')
+            .chain(['e', 'm', 's', '#', '+', '-', ' '])
+        {
             assert_ne!(glyph(ch), unknown, "{ch}");
         }
+    }
+
+    fn tiles<'a>(f: &'a Frame, n: usize) -> Vec<Tile<'a>> {
+        (0..n)
+            .map(|i| Tile {
+                frame: f,
+                label: format!("#{i} +{}ms", i * 250),
+                phase: TilePhase::During,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn frame_png_round_trips_size() {
+        let (w, h, _) = decode(&frame_png(&frame(603, 1311)));
+        assert_eq!((w, h), (603, 1311));
+    }
+
+    #[test]
+    fn sheet_fits_24_iphone_frames_on_one_sheet() {
+        let f = frame(603, 1311);
+        let sheets = contact_sheet(&tiles(&f, 24));
+        assert_eq!(sheets.len(), 1);
+        let (w, h, _) = decode(&sheets[0]);
+        assert!(w <= 1568 && h <= 1568, "{w}x{h}");
+    }
+
+    #[test]
+    fn sheet_overflows_to_a_second_sheet() {
+        let f = frame(603, 1311);
+        let sheets = contact_sheet(&tiles(&f, 40));
+        assert_eq!(sheets.len(), 2);
+        for s in &sheets {
+            let (w, h, _) = decode(s);
+            assert!(w <= 1568 && h <= 1568, "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn sheet_handles_mixed_frame_sizes() {
+        let (tall, wide) = (frame(603, 1311), frame(1311, 603));
+        let t = |f, label: &str| Tile {
+            frame: f,
+            label: label.into(),
+            phase: TilePhase::Before,
+        };
+        let sheets = contact_sheet(&[t(&tall, "#0 +0ms"), t(&wide, "#1 +50ms")]);
+        assert_eq!(sheets.len(), 1);
+        let (w, h, px) = decode(&sheets[0]);
+        let cell = TILE_W + 2 * BORDER;
+        assert_eq!(w as usize, GUTTER + 2 * (cell + GUTTER));
+        // Row height follows the tall tile (391 px at 180 wide).
+        assert_eq!(h as usize, GUTTER + 391 + 2 * BORDER + LABEL_H + GUTTER);
+        // The wide tile is 180 x 82: below it, inside its cell, is background.
+        let i = ((GUTTER + 2 * BORDER + 82 + 20) * w as usize + GUTTER + cell + GUTTER + 90) * 3;
+        assert_eq!(px[i..i + 3], SHEET_BG);
+    }
+
+    #[test]
+    fn phase_borders_differ() {
+        let f = frame(100, 200);
+        let mk = |phase| Tile {
+            frame: &f,
+            label: "#0".into(),
+            phase,
+        };
+        let sheets = contact_sheet(&[mk(TilePhase::Before), mk(TilePhase::During)]);
+        let (w, _, px) = decode(&sheets[0]);
+        let at = |tile: usize| {
+            let i =
+                ((GUTTER + 1) * w as usize + GUTTER + tile * (TILE_W + 2 * BORDER + GUTTER) + 1)
+                    * 3;
+            [px[i], px[i + 1], px[i + 2]]
+        };
+        assert_eq!(at(0), PHASE_BEFORE);
+        assert_eq!(at(1), PHASE_DURING);
     }
 }
