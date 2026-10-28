@@ -23,6 +23,7 @@ use crate::hid::{HidClient, HidEvent, QUEUE_CAP};
 use crate::protocol::{HidCmd, Phase};
 use crate::shm::Frame;
 use crate::stats::{Stats, StatsTracker};
+use crate::tap::FrameTap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -916,6 +917,15 @@ impl Driver {
     pub fn capture(&self, wait: Duration) -> Option<Frame> {
         let capturer = lock(&self.inner.frame).pipeline.as_ref()?.capturer();
         capturer.capture(wait)
+    }
+
+    /// A sampled tap on the frame stream, at most `fps` frames a second (clamped to
+    /// 1..=60), for recording what the screen does; `None` without a frame pipeline
+    /// (the driver has stopped). It never slows the stream to `on_event`: frames the tap's
+    /// consumer is too slow for are skipped, not queued. Reports [`crate::TapRecv::Closed`]
+    /// once the driver stops.
+    pub fn frame_tap(&self, fps: u32) -> Option<FrameTap> {
+        Some(lock(&self.inner.frame).pipeline.as_ref()?.tap(fps))
     }
 
     /// A tap at (`x`, `y`), normalized 0..1 inside the box: a pointer down and up.

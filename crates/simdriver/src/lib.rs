@@ -20,6 +20,7 @@ mod hid;
 mod protocol;
 mod shm;
 mod stats;
+mod tap;
 
 pub use ax::AxNode;
 pub use devices::{
@@ -35,6 +36,7 @@ pub use grid::Grid;
 pub use protocol::Phase;
 pub use shm::Frame;
 pub use stats::Stats;
+pub use tap::{FrameTap, TapFeeder, TapFrame, TapHealth, TapRecv};
 
 #[doc(hidden)]
 pub mod __internal {

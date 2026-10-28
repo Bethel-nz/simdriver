@@ -11,21 +11,28 @@
 //! [`FramePipeline::capture`] asks the worker for a copy of the newest frame it has read,
 //! so a host that wants one still frame (an agent screenshot) needs no per-frame copy.
 //!
+//! [`FramePipeline::tap`] attaches a [`FrameTap`]: the worker offers each frame it reads to
+//! every attached feeder, stamped when read and before `on_frame`. Offers never block and
+//! copy only the frames a tap samples (see `tap.rs`); taps whose consumer is gone are
+//! pruned on the next frame. Taps live as long as the pipeline, across helper restarts.
+//!
 //! Both callbacks run inside a [`CallbackGate`]: once drop returns, neither is running nor
 //! will start (except a drop from inside a callback, which does not wait for itself).
 use crate::helper::CallbackGate;
 use crate::protocol::{FrameMsg, parse_frame_line};
 use crate::shm::{Frame, ShmReader};
+use crate::tap::{FrameTap, TapFeeder};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 enum Msg {
     Shm { name: String, slots: u32, cap: u64 },
     Frame { slot: u32, seq: u64 },
     Capture(Sender<Frame>),
+    Tap(TapFeeder),
     Stop,
 }
 
@@ -106,6 +113,15 @@ impl FramePipeline {
         }
     }
 
+    /// A sampled tap on the frames this pipeline reads, at most `fps` a second (clamped
+    /// to 1..=60). Reports [`crate::TapRecv::Closed`] once the pipeline is dropped.
+    pub fn tap(&self, fps: u32) -> FrameTap {
+        let (tap, feeder) = FrameTap::manual(fps);
+        // Worker gone: the feeder drops with the message and the tap reports Closed.
+        let _ = self.tx.send(Msg::Tap(feeder));
+        tap
+    }
+
     /// `shm` + `frame` lines handed to the worker so far.
     pub fn lines_seen(&self) -> u64 {
         self.lines.load(Ordering::SeqCst)
@@ -142,6 +158,7 @@ fn worker(rx: Receiver<Msg>, gate: &CallbackGate, on_frame: impl Fn(Frame)) {
     // The last frame delivered, and captures waiting for a readable frame.
     let mut last: Option<(u32, u64)> = None;
     let mut captures: Vec<Sender<Frame>> = Vec::new();
+    let mut taps: Vec<TapFeeder> = Vec::new();
     loop {
         let Ok(first) = rx.recv() else { return };
         let mut newest: Option<(u32, u64)> = None;
@@ -149,6 +166,7 @@ fn worker(rx: Receiver<Msg>, gate: &CallbackGate, on_frame: impl Fn(Frame)) {
             match msg {
                 Msg::Stop => return,
                 Msg::Capture(tx) => captures.push(tx),
+                Msg::Tap(feeder) => taps.push(feeder),
                 // A segment can already be gone (sdframe unlinks a generation ~1 s after
                 // announcing the next): keep the current reader and wait for the next line.
                 Msg::Shm { name, slots, cap } => {
@@ -166,6 +184,8 @@ fn worker(rx: Receiver<Msg>, gate: &CallbackGate, on_frame: impl Fn(Frame)) {
             && let Some(frame) = r.read(slot, seq)
         {
             last = Some((slot, seq));
+            let at = Instant::now();
+            taps.retain(|t| t.offer(at, &frame));
             gate.run(|| on_frame(frame));
         }
         // Overwritten since (None): leave the captures parked; the next frame answers them.
@@ -185,6 +205,7 @@ mod tests {
     use super::*;
     use crate::helper::{Supervised, fake_helper};
     use crate::shm::{FrameHeader, ShmWriter};
+    use crate::tap::TapRecv;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Mutex, mpsc};
     use std::time::{Duration, Instant};
@@ -301,6 +322,40 @@ mod tests {
                 .expect("capture after the next frame");
             assert_eq!((c.seq, c.data[0]), (10, 10));
         });
+    }
+
+    #[test]
+    fn tap_receives_frames_and_host_still_gets_every_frame() {
+        let n = shm_name("tap");
+        let w = ShmWriter::create(&n, 3, 16).unwrap();
+        let r = rig(false);
+        let tap = r.pipeline.tap(30);
+        r.helper.send_line(&shm_line(&n, 16));
+        // Frames 40 ms apart (over the 30 fps sampling interval): every one is sampled.
+        for seq in [2, 4, 6, 8] {
+            let before = Instant::now();
+            write_frame(&w, seq);
+            r.helper.send_line(&frame_line(seq));
+            let host = r.frames.recv_timeout(W).expect("host frame");
+            assert_eq!((host.seq, host.data[0]), (seq, seq as u8));
+            let t = tap.recv_timeout(W).expect("tap frame");
+            assert_eq!((t.frame.seq, t.frame.data[0]), (seq, seq as u8));
+            assert!(t.at >= before, "stamped when the worker read it");
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        let h = tap.health();
+        assert_eq!((h.received, h.sampled, h.skipped_by_tap), (4, 4, 0));
+
+        // A second tap, dropped: the worker prunes it and the host keeps getting frames.
+        drop(r.pipeline.tap(30));
+        write_frame(&w, 10);
+        r.helper.send_line(&frame_line(10));
+        assert_eq!(r.frames.recv_timeout(W).unwrap().seq, 10);
+        assert_eq!(tap.recv_timeout(W).unwrap().frame.seq, 10);
+
+        // The pipeline drops its feeders with the worker: the tap reports Closed.
+        drop(r);
+        assert_eq!(tap.recv_timeout(W).unwrap_err(), TapRecv::Closed);
     }
 
     #[test]
