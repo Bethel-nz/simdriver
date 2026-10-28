@@ -22,6 +22,10 @@ The screen, through the agent layer:
   agent snapshot [--settle-ms N] [--grid] [--cols N] [--image <path>]
   agent tap <target> [--expect <text>]
   agent steps <json | @file> [--out <dir>]
+  screenshot [<path>]
+      The screen as a plain PNG (no element boxes, no grid). <path> is a file, or a
+      directory to put it in; default ~/.cache/simdriver/shots/<udid>-<time>.png.
+      Prints the path written.
   agent record [--time <dur>] [--idle-ms N] [--full] [--fps N] [--max-frames N]
                [--out <dir>] [-- tap <target> | -- steps <json | @file>]
       Record what the screen does around the actions after `--` (none: just watch).
@@ -42,7 +46,8 @@ Apps and simulator state:
   reset app-data <bundle> | reset keychain
 
 A target is a ref from the last snapshot (e4), a label on screen (\"Log in\"),
-or a grid cell (C4). The last snapshot is remembered per device between calls.
+a grid cell (C4, tapped at its centre), or a point in screen points (@201,816).
+The last snapshot is remembered per device between calls.
 
 Options:
   --udid <udid>   Which simulator (default: the only booted one).
@@ -227,6 +232,31 @@ fn run(args: &[String]) -> Result<(), CliError> {
             Ok(())
         }
         "agent" => agent_command(rest),
+        "screenshot" => {
+            let args = parse_args(rest, &["--udid"])?;
+            if let Some(extra) = args.words.get(1) {
+                return Err(CliError::Usage(format!("unexpected {extra}")));
+            }
+            let udid = pick_booted(args.flag("--udid"))?;
+            let path = screenshot_path(args.words.first().map(String::as_str), &udid)?;
+            let driver = start_driver(&udid)?;
+            let agent = Agent::new(driver);
+            let shot = agent.screenshot().map_err(|e| e.to_string());
+            agent.device().stop();
+            let png = shot?;
+            std::fs::write(&path, &png)
+                .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+            if args.bool("--json") {
+                let (width, height) = png_size(&png);
+                println!(
+                    "{}",
+                    serde_json::json!({"path": path, "width": width, "height": height})
+                );
+            } else {
+                println!("{}", path.display());
+            }
+            Ok(())
+        }
         "launch" | "terminate" | "open-url" => {
             let args = parse_args(rest, &["--udid"])?;
             let udid = pick_booted(args.flag("--udid"))?;
@@ -633,6 +663,36 @@ fn write_recording(dir: &std::path::Path, recording: &mut Recording) -> Result<(
     Ok(())
 }
 
+/// Where `screenshot` writes: `path` as given, or a generated `<udid>-<unix_ms>.png` inside
+/// it when it is a directory (existing, or written with a trailing `/`), or by default
+/// inside `<cache>/simdriver/shots/`. Parent directories are created before the driver
+/// starts, so a bad path costs nothing on the simulator. The result is absolute.
+fn screenshot_path(path: Option<&str>, udid: &str) -> Result<PathBuf, CliError> {
+    let name = || format!("{}-{}.png", udid_short(udid), unix_ms());
+    let file = match path {
+        Some("") => return Err(CliError::Usage("the screenshot path is empty".into())),
+        Some(path) if path.ends_with('/') || std::path::Path::new(path).is_dir() => {
+            PathBuf::from(path).join(name())
+        }
+        Some(path) => PathBuf::from(path),
+        None => state_dir()?.join("shots").join(name()),
+    };
+    if let Some(parent) = file.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    }
+    Ok(std::path::absolute(&file)?)
+}
+
+/// A PNG's width and height, from its IHDR chunk.
+fn png_size(png: &[u8]) -> (u32, u32) {
+    let at = |i: usize| {
+        png.get(i..i + 4)
+            .map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    (at(16), at(20))
+}
+
 /// The default output directory: `<cache>/simdriver/records/<udid>-<unix_ms>/`.
 fn default_record_dir(udid: &str) -> Result<PathBuf, CliError> {
     Ok(state_dir()?
@@ -757,6 +817,11 @@ fn finish_run(
                     for (index, (shot, taken)) in
                         shots.iter_mut().zip(&report.screenshots).enumerate()
                     {
+                        if let Some(file) = &taken.file {
+                            // A `screenshot` step with a `path` already wrote it there.
+                            shot["png"] = serde_json::Value::String(file.clone());
+                            continue;
+                        }
                         let path = dir.join(format!(
                             "shot-{}-{index}-{}.png",
                             udid_short(udid),
@@ -879,6 +944,46 @@ fn save_state(agent: &Agent<sd::Driver>, udid: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screenshot_path_is_a_file_or_a_name_in_a_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "simdriver-cli-shot-{}-{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        let file = dir.join("a").join("shot.png");
+        let got = screenshot_path(file.to_str(), "ABCDEF12-3456").unwrap();
+        assert_eq!(got, file);
+        assert!(dir.join("a").is_dir());
+
+        let inside = screenshot_path(dir.to_str(), "ABCDEF12-3456").unwrap();
+        assert_eq!(inside.parent(), Some(dir.as_path()));
+        let name = inside.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("ABCDEF12-") && name.ends_with(".png"),
+            "{name}"
+        );
+
+        let fresh = format!("{}/new/", dir.display());
+        let made = screenshot_path(Some(&fresh), "ABCDEF12").unwrap();
+        assert_eq!(made.parent(), Some(dir.join("new").as_path()));
+
+        assert!(matches!(
+            screenshot_path(Some(""), "ABCDEF12"),
+            Err(CliError::Usage(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn png_size_reads_the_header() {
+        let mut png = vec![0u8; 24];
+        png[16..20].copy_from_slice(&603u32.to_be_bytes());
+        png[20..24].copy_from_slice(&1311u32.to_be_bytes());
+        assert_eq!(png_size(&png), (603, 1311));
+        assert_eq!(png_size(&[]), (0, 0));
+    }
 
     #[test]
     fn flags_and_words_split() {

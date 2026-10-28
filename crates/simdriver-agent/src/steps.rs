@@ -69,6 +69,13 @@ pub enum Step {
     Back { mode: String },
     /// Open the iOS app switcher with a double home-button press.
     AppSwitcher,
+    /// Capture the whole screen as a plain PNG (no annotations) attached to the step
+    /// report, with target `screen`. `path` also writes it there: a file, or a directory
+    /// (existing, or ending in `/`) to put `screen-<unix_ms>.png` in; folders are created.
+    Screenshot {
+        #[serde(default)]
+        path: Option<String>,
+    },
     /// Capture the target's frame as a cropped PNG attached to the step report.
     ScreenshotElement { target: String },
     /// Read, wait for, accept, or dismiss a system alert. Dismiss only uses explicit safe labels.

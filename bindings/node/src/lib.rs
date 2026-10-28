@@ -166,6 +166,23 @@ impl Task for SnapshotTask {
     }
 }
 
+pub struct ScreenshotTask {
+    agent: Arc<CoreAgent>,
+}
+
+impl Task for ScreenshotTask {
+    type Output = Vec<u8>;
+    type JsValue = Buffer;
+
+    fn compute(&mut self) -> Result<Vec<u8>> {
+        self.agent.screenshot().map_err(agent_err)
+    }
+
+    fn resolve(&mut self, _env: Env, png: Vec<u8>) -> Result<Buffer> {
+        Ok(Buffer::from(png))
+    }
+}
+
 pub struct TapTask {
     agent: Arc<CoreAgent>,
     target: String,
@@ -222,7 +239,11 @@ impl Task for StepsTask {
         Ok((json, sheets, images))
     }
 
-    fn resolve(&mut self, _env: Env, (report, sheets, images): Self::Output) -> Result<JsStepsResult> {
+    fn resolve(
+        &mut self,
+        _env: Env,
+        (report, sheets, images): Self::Output,
+    ) -> Result<JsStepsResult> {
         Ok(JsStepsResult {
             report,
             sheets,
@@ -266,6 +287,14 @@ impl JsAgent {
         AsyncTask::new(SnapshotTask {
             agent: self.inner.clone(),
             opts,
+        })
+    }
+
+    /// The screen as a plain PNG: no element boxes, no grid.
+    #[napi(ts_return_type = "Promise<Buffer>")]
+    pub fn screenshot(&self) -> AsyncTask<ScreenshotTask> {
+        AsyncTask::new(ScreenshotTask {
+            agent: self.inner.clone(),
         })
     }
 

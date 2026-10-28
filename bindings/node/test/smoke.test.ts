@@ -1,7 +1,8 @@
 // Task 11 smoke test — run with `bun test` or `node --import tsx test/node.test.mjs`.
 // Without SIMDRIVER_IT=1 only the local parts run; with it, a driver is started on the
 // booted test simulator (SIMDRIVER_TEST_UDID, else first booted) over anim.html.
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
@@ -89,6 +90,30 @@ describe('simdriver', () => {
     expect(steps[0].action).toBe('record');
     expect(steps[0].timeMs).toBe(800);
     expect(steps[1].target).toBe('Save');
+  });
+
+  test('agent.screenshot returns the PNG and writes it when given a path', async () => {
+    const native = createRequire(import.meta.url)(
+      join(here, '..', `simdriver.${process.platform}-${process.arch}.node`),
+    );
+    const real = native.Agent;
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    native.Agent = class {
+      async screenshot() {
+        return png;
+      }
+    };
+    const dir = mkdtempSync(join(tmpdir(), 'simdriver-shot-'));
+    const path = join(dir, 'nested', 'shot.png');
+    try {
+      const agent = new (Driver as unknown as new (n: unknown) => Driver)({}).agent();
+      expect((await agent.screenshot()).equals(png)).toBe(true);
+      expect((await agent.screenshot(path)).equals(png)).toBe(true);
+      expect(readFileSync(path).equals(png)).toBe(true);
+    } finally {
+      native.Agent = real;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test('Driver.start({}) accepts missing options (no null reaches napi)', async () => {

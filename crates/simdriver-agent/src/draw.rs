@@ -181,6 +181,10 @@ pub fn grid(frame: &Frame, grid: &Grid) -> Vec<u8> {
             let x = (f64::from(col) * w / f64::from(grid.cols)) as i64 + 2 * t;
             let y = (f64::from(row) * h / f64::from(grid.rows)) as i64 + 2 * t;
             c.tag(x, y, &grid.name(row, col), s, GRID);
+            // Where a tap on this cell lands: its centre.
+            let cx = ((f64::from(col) + 0.5) * w / f64::from(grid.cols)) as i64;
+            let cy = ((f64::from(row) + 0.5) * h / f64::from(grid.rows)) as i64;
+            c.fill(cx - 2 * t, cy - 2 * t, cx + 2 * t, cy + 2 * t, GRID, 256);
         }
     }
     c.png()

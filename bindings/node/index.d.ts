@@ -33,6 +33,8 @@ export type StepsReport = { ok: boolean; completed: number; failed: StepFailure 
 export declare class Agent {
   /** `settleMs`, `image`, `grid`, `cols` (all optional). */
   snapshot(options?: { settleMs?: number; image?: boolean; grid?: boolean; cols?: number }): Promise<Snapshot>
+  /** The screen as a plain PNG (no element boxes, no grid); with `path`, also written there (folders created). */
+  screenshot(path?: string): Promise<Buffer>
   tap(target: string, options?: { expect?: string }): Promise<TapReport>
   /** Steps as an array of action objects; index.js stringifies them for the native side. */
   steps(steps: unknown[]): Promise<StepsReport>

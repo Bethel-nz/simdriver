@@ -4,13 +4,13 @@ simdriver exposes low-level simulator control through `Driver` and higher-level,
 
 ## Agent
 
-Create an `Agent` from a `Driver`. `snapshot()` waits for the screen to settle and returns accessible elements with refs (`e1`, `e2`, …), plus an annotated image when requested. Refs are checked against the current screen before use. Screens without accessible elements can be addressed with the lettered grid (`A1`, `B2`, …). `steps()` runs actions in order and stops at the first failure.
+Create an `Agent` from a `Driver`. `snapshot()` waits for the screen to settle and returns accessible elements with refs (`e1`, `e2`, …), plus an annotated image when requested. Refs are checked against the current screen before use. Screens without accessible elements can be addressed with the lettered grid (`A1`, `B2`, …). `steps()` runs actions in order and stops at the first failure. `screenshot(path?)` returns the screen as it is now as a plain PNG Buffer (no annotations, no settle wait), also writing it to `path` when given; CLI: `simdriver screenshot [path]` (a file, or a directory to name one in; default `~/.cache/simdriver/shots/`), which prints the path.
 
 Pass these actions to `Agent.steps()`:
 
 | Action | Description |
 | --- | --- |
-| `tap` | Tap a ref, visible label, identifier, or grid cell. |
+| `tap` | Tap a ref, visible label, identifier, grid cell (at its centre), or point `@x,y` in screen points. An exact label or identifier wins over an element whose value is that text. |
 | `doubleTap` | Tap the same validated target twice. |
 | `longPress` | Press and hold a target; defaults to 800 ms. |
 | `drag` | Drag between two targets, with configurable source hold, movement, and destination hold times. |
@@ -21,7 +21,7 @@ Pass these actions to `Agent.steps()`:
 | `fling` | Fast directional swipe with momentum (`up`, `down`, `left`, `right`). |
 | `swipe` | Swipe between targets or normalized `[x, y]` points; can repeat up to 10 times. |
 | `scroll` | Scroll up, down, left, or right, optionally within a target. Scrolls avoid the detected keyboard. |
-| `fill` | Replace a text field’s contents, then report whether the value was verified. `secret: true` redacts it from reports. |
+| `fill` | Replace a text field’s contents, then report whether the value was verified. Values up to 8 characters (codes, PINs) are typed one key at a time so a one-box-per-digit OTP keeps up, and are read back across the row of boxes. If nothing reaches the field the step fails (`commit-not-observed`). `secret: true` redacts it from reports. |
 | `type` | Type text into the focused control. Non-ASCII text uses the simulator pasteboard, so the app sees a paste. |
 | `key` | Press a named key or key combination, such as `enter` or `cmd+a`. |
 | `press` | Press a hardware button: `home`, `lock`, `side`, `siri`, `volume-up`, or `volume-down`. |
@@ -31,9 +31,10 @@ Pass these actions to `Agent.steps()`:
 | `setLocation` | Set simulator latitude and longitude. |
 | `appearance` | Set light or dark appearance. |
 | `clipboardRead` / `clipboardWrite` | Read or write the simulator pasteboard; writing an empty string clears it. |
-| `keyboardDismiss` | Dismiss the on-screen keyboard and verify it is gone. |
+| `keyboardDismiss` | Dismiss the on-screen keyboard and verify it is gone: the keyboard's own Done/close key, else Return, else a tap on empty space well clear of every control and field. If it is still up, the step fails (`not-ready`) naming what it tried; some screens only close it from their own controls. |
 | `back` | Navigate with the system edge gesture or an in-app back control. |
 | `appSwitcher` | Open the app switcher with a double Home-button press. |
+| `screenshot` | Return the whole screen as a plain PNG (no element boxes or grid), with target `screen`. `path` also writes it there (a file, or a directory ending in `/`); the report's `file` is the absolute path. |
 | `screenshotElement` | Return a cropped PNG of a target element. |
 | `record` | Record the screen over the steps that follow; first step only. See Record. |
 | `alert` | Get, wait for, accept, or dismiss a visible system alert. Dismiss uses known safe button labels only. |

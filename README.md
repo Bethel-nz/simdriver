@@ -81,6 +81,7 @@ calls in `~/.cache/simdriver/`:
 ```sh
 simdriver devices
 simdriver agent snapshot --image shot.png   # elements numbered e1, e2… + annotated shot
+simdriver screenshot shot.png               # plain PNG of the screen, no annotations
 simdriver agent tap e4                      # validated against the live screen first
 simdriver agent steps '[{"action":"tap","target":"Log in"},{"action":"waitFor","text":"Welcome"}]'
 simdriver agent record -- tap "Save"        # contact sheet + timed frames of what the tap sets off

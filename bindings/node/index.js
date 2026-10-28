@@ -3,7 +3,7 @@
 // (simdriver.<platform>.node) and presents the plan's public API: frames as BGRA
 // Buffers, input in 0..1 box coordinates. Hand-written — `napi build` must run with
 // --no-js or it overwrites this file with its template.
-const { join } = require('node:path');
+const { dirname, join } = require('node:path');
 const fs = require('node:fs');
 
 const bindingName = `simdriver.${process.platform}-${process.arch}.node`;
@@ -50,6 +50,21 @@ class Agent {
     } catch (e) {
       throw agentError(e);
     }
+  }
+
+  /** The screen as a plain PNG Buffer; with `path`, also written there (folders created). */
+  async screenshot(path) {
+    let png;
+    try {
+      png = await this.#n.screenshot();
+    } catch (e) {
+      throw agentError(e);
+    }
+    if (path) {
+      await fs.promises.mkdir(dirname(path), { recursive: true });
+      await fs.promises.writeFile(path, png);
+    }
+    return png;
   }
 
   async tap(target, opts = {}) {

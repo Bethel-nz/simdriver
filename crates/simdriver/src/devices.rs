@@ -265,9 +265,7 @@ pub fn clear_app_data(udid: &str, bundle_id: &str) -> Result<(), Error> {
     // Not running is the usual case: nothing to terminate before erasing. simctl words it
     // "found nothing to terminate" (ESRCH) and, on some versions, "app is not running".
     if !terminated
-        && !terminate_err
-            .to_ascii_lowercase()
-            .contains("not running")
+        && !terminate_err.to_ascii_lowercase().contains("not running")
         && !terminate_err
             .to_ascii_lowercase()
             .contains("found nothing to terminate")

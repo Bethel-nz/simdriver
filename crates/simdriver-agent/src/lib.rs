@@ -45,6 +45,10 @@ const EMPTY_SETTLE: Duration = Duration::from_secs(1);
 const SETTLE_DEFAULT: Duration = Duration::from_secs(10);
 /// After tapping a text field, before typing (focus and keyboard).
 const FOCUS_WAIT: Duration = Duration::from_millis(300);
+/// `fill` types values up to this long one key at a time (OTP and PIN codes): a field
+/// per digit moves focus in app code between keys, and a burst outruns it.
+const CODE_MAX: usize = 8;
+const CODE_GAP: Duration = Duration::from_millis(120);
 const WAIT_FOR_DEFAULT: Duration = Duration::from_secs(5);
 const CAPTURE_WAIT: Duration = Duration::from_secs(1);
 /// How long a pinch or rotation stroke takes.
@@ -504,6 +508,9 @@ pub struct StepsReport {
 pub struct ElementScreenshot {
     pub target: String,
     pub png: Vec<u8>,
+    /// Where a `screenshot` step with a `path` wrote it (absolute).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -600,12 +607,44 @@ pub struct AgentState {
     pub refs: Refs,
 }
 
+/// Write a `screenshot` step's PNG to `path`: a file, or a directory (existing, or ending
+/// in `/`) to put `screen-<unix_ms>.png` in. Folders are created. Returns the absolute path.
+fn write_screenshot(path: &str, png: &[u8]) -> Result<String, AgentError> {
+    let refuse = |e: &dyn fmt::Display| AgentError::Invalid(format!("screenshot path {path}: {e}"));
+    if path.is_empty() {
+        return Err(refuse(&"empty"));
+    }
+    let given = std::path::Path::new(path);
+    let file = if path.ends_with('/') || given.is_dir() {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        given.join(format!("screen-{ms}.png"))
+    } else {
+        given.to_path_buf()
+    };
+    if let Some(parent) = file.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| refuse(&e))?;
+    }
+    std::fs::write(&file, png).map_err(|e| refuse(&e))?;
+    let file = std::path::absolute(&file).map_err(|e| refuse(&e))?;
+    Ok(file.to_string_lossy().into_owned())
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// `e` followed by digits, in either case: an element ref. Grid rows skip E, so a cell
 /// name never reads as one.
+/// A point target, `@x,y` in screen points (e.g. `@201,816`): taps exactly there, for
+/// what neither a ref nor a grid cell's centre reaches.
+fn point(s: &str) -> Option<[f64; 2]> {
+    let (x, y) = s.trim().strip_prefix('@')?.split_once(',')?;
+    let (x, y) = (x.trim().parse::<f64>().ok()?, y.trim().parse::<f64>().ok()?);
+    (x.is_finite() && y.is_finite()).then_some([x, y])
+}
+
 fn is_ref(s: &str) -> bool {
     s.len() > 1 && s.starts_with(['e', 'E']) && s[1..].bytes().all(|b| b.is_ascii_digit())
 }
@@ -770,6 +809,16 @@ impl<D: Device> Agent<D> {
         });
     }
 
+    /// The screen as it is now, as a plain PNG: no element boxes, no grid, at the
+    /// stream's resolution. It does not wait for the screen to settle or touch the refs.
+    pub fn screenshot(&self) -> Result<Vec<u8>, AgentError> {
+        let frame = self
+            .device
+            .capture(CAPTURE_WAIT)
+            .ok_or_else(|| AgentError::NotReady("no frame yet".into()))?;
+        Ok(draw::frame_png(&frame))
+    }
+
     /// Wait for the screen to settle, list its elements (or grid), and draw them.
     pub fn snapshot(&self, opts: &SnapshotOptions) -> Result<Snapshot, AgentError> {
         let screen = self.screen()?;
@@ -850,6 +899,9 @@ impl<D: Device> Agent<D> {
     /// refused if it vanished or moved, is covered, or — with `expect` — its name no
     /// longer contains that text.
     pub fn tap(&self, target: &str, expect: Option<&str>) -> Result<Tapped, AgentError> {
+        if let Some(p) = point(target) {
+            return self.tap_point(target, p, None, false);
+        }
         if is_ref(target) {
             let screen = self.screen()?;
             return self.tap_ref(&target.to_ascii_lowercase(), expect, screen, None, false);
@@ -948,16 +1000,127 @@ impl<D: Device> Agent<D> {
                 el.name()
             ))
         })?;
+        // A key of a keyboard that may still be sliding in: its frame is where it will be.
+        let key = keyboard_frame(&root, screen).is_some_and(|k| p[1] >= k[1]);
         self.mark(Some(root), screen, false);
+        if key {
+            self.screen_still();
+        }
         let at = (p[0] / screen.0, p[1] / screen.1);
         match hold {
             Some(h) => self.device.long_press(at.0, at.1, h),
             None if double => self.device.double_tap(at.0, at.1),
             None => self.device.tap(at.0, at.1),
         }
+        if hold.is_none() && el.takes_text() {
+            self.keyboard_still(screen);
+        }
         Ok(Tapped {
             target: target.to_string(),
             name: el.name().to_string(),
+            at: p,
+        })
+    }
+
+    /// Wait (600 ms at most) until two frames 50 ms apart barely differ: the screen has
+    /// stopped moving (a keyboard finished sliding in).
+    fn screen_still(&self) {
+        let start = Instant::now();
+        let print = || {
+            self.device
+                .capture(Duration::from_millis(100))
+                .map(|f| fingerprint(&f))
+        };
+        let Some(mut prev) = print() else {
+            return;
+        };
+        while start.elapsed() < Duration::from_millis(600) {
+            thread::sleep(Duration::from_millis(50));
+            let Some(now) = print() else {
+                return;
+            };
+            if changed(&prev, &now) < 0.02 {
+                return;
+            }
+            prev = now;
+        }
+    }
+
+    /// After focusing a text input: wait (about a second at most) for its keyboard to come
+    /// up and stop moving, so the next step does not land on a keyboard mid-slide.
+    /// Returns early when no keyboard comes up.
+    fn keyboard_still(&self, screen: (f64, f64)) {
+        let start = Instant::now();
+        let mut last = None;
+        while start.elapsed() < Duration::from_secs(1) {
+            thread::sleep(POLL);
+            let Ok(root) = self.device.accessibility() else {
+                return;
+            };
+            let now = keyboard_frame(&root, screen);
+            match now {
+                None if start.elapsed() >= FOCUS_WAIT * 2 => return,
+                Some(f) if last == Some(f) && start.elapsed() >= FOCUS_WAIT => return,
+                _ => {}
+            }
+            last = now;
+        }
+    }
+
+    /// The text in `seed`'s row of one-character boxes (an OTP field drawn as a text
+    /// input per digit), left to right; `None` unless the row has two or more inputs.
+    fn row_value(&self, seed: &Element, screen: (f64, f64)) -> Result<Option<String>, AgentError> {
+        let root = self.device.accessibility()?;
+        let (fresh, _) = marks::elements(&root, screen);
+        let mid = seed.frame[1] + seed.frame[3] / 2.0;
+        let mut row: Vec<&Element> = fresh
+            .iter()
+            .filter(|e| {
+                e.takes_text()
+                    && (e.frame[1] + e.frame[3] / 2.0 - mid).abs() < seed.frame[3].max(1.0) / 2.0
+                    && (e.frame[3] - seed.frame[3]).abs() <= seed.frame[3] / 2.0
+            })
+            .collect();
+        if row.len() < 2 {
+            return Ok(None);
+        }
+        row.sort_by(|a, b| a.frame[0].total_cmp(&b.frame[0]));
+        Ok(Some(
+            row.iter()
+                .map(|e| match (&e.value, &e.placeholder) {
+                    (Some(v), Some(p)) if v == p => "",
+                    (Some(v), _) => v.as_str(),
+                    (None, _) => "",
+                })
+                .collect(),
+        ))
+    }
+
+    /// Touch a point given in screen points: a tap, or with `hold` a long press.
+    fn tap_point(
+        &self,
+        target: &str,
+        p: [f64; 2],
+        hold: Option<Duration>,
+        double: bool,
+    ) -> Result<Tapped, AgentError> {
+        let screen = self.screen()?;
+        if !(0.0..=screen.0).contains(&p[0]) || !(0.0..=screen.1).contains(&p[1]) {
+            return Err(AgentError::NotFound(format!(
+                "{target} is off the {}x{} pt screen",
+                screen.0, screen.1
+            )));
+        }
+        self.mark(None, screen, false);
+        let (x, y) = (p[0] / screen.0, p[1] / screen.1);
+        match hold {
+            Some(h) => self.device.long_press(x, y, h),
+            None if double => self.device.double_tap(x, y),
+            None => self.device.tap(x, y),
+        }
+        Ok(Tapped {
+            target: target.to_string(),
+            name: String::new(),
             at: p,
         })
     }
@@ -1007,6 +1170,9 @@ impl<D: Device> Agent<D> {
         hold: Option<Duration>,
         double: bool,
     ) -> Result<Tapped, AgentError> {
+        if let Some(p) = point(target) {
+            return self.tap_point(target, p, hold, double);
+        }
         if is_ref(target) {
             let screen = self.screen()?;
             return self.tap_ref(&target.to_ascii_lowercase(), None, screen, hold, double);
@@ -1035,6 +1201,9 @@ impl<D: Device> Agent<D> {
     /// it moved or vanished; a label is found on a settled screen; a grid cell resolves
     /// to its centre. `from_end` also refuses a covered element (a drag starts there).
     fn locate(&self, target: &str, from_end: bool) -> Result<[f64; 2], AgentError> {
+        if let Some(p) = point(target) {
+            return Ok(p);
+        }
         if is_ref(target) {
             let key = target.to_ascii_lowercase();
             let last = lock(&self.last).clone().ok_or_else(|| {
@@ -1122,12 +1291,16 @@ impl<D: Device> Agent<D> {
                 e.identifier.as_deref(),
                 e.value.as_deref(),
             ];
-            let exact = names.iter().flatten().any(|n| n.to_lowercase() == want);
+            let is = |n: &Option<&str>| n.is_some_and(|n| n.to_lowercase() == want);
             let partial = names
                 .iter()
                 .flatten()
                 .any(|n| n.to_lowercase().contains(&want));
-            let score = if exact {
+            // A name beats a value: once a field holds "5", the key labelled "5" is
+            // still what "5" means.
+            let score = if is(&names[0]) || is(&names[1]) {
+                3
+            } else if is(&names[2]) {
                 2
             } else if partial {
                 1
@@ -1295,25 +1468,48 @@ impl<D: Device> Agent<D> {
         if !is_empty {
             return Err(AgentError::ClearNotObserved);
         }
-        for chunk in value.chars().collect::<Vec<_>>().chunks(128) {
-            self.device.text(&chunk.iter().collect::<String>());
-            thread::sleep(Duration::from_millis(20));
+        let chars = value.chars().collect::<Vec<_>>();
+        if chars.len() <= CODE_MAX {
+            for c in &chars {
+                self.device.text(&c.to_string());
+                thread::sleep(CODE_GAP);
+            }
+        } else {
+            for chunk in chars.chunks(128) {
+                self.device.text(&chunk.iter().collect::<String>());
+                thread::sleep(Duration::from_millis(20));
+            }
         }
         // Keystrokes land over time (slower under load): read back until the value
         // matches, or a mismatch (autocorrect, an input mask) holds for the whole wait.
+        // A code split over a row of boxes is read across the row.
         let deadline = Instant::now() + Duration::from_secs(2);
-        let final_value = loop {
+        let (final_value, row) = loop {
             let v = self.field_value(&field, screen)?;
-            if v.as_deref() == Some(value) || Instant::now() >= deadline {
-                break v;
+            let row = if v.as_deref() == Some(value) {
+                None
+            } else {
+                self.row_value(&field, screen)?
+            };
+            if v.as_deref() == Some(value)
+                || row.as_deref() == Some(value)
+                || Instant::now() >= deadline
+            {
+                break (v, row);
             }
             thread::sleep(POLL);
         };
-        let verified = match final_value.as_deref() {
-            Some(actual) => actual == value && field.placeholder.as_deref() != Some(actual),
-            None if field.placeholder.is_some() => false,
-            None => return Err(AgentError::CommitNotObserved),
-        };
+        let blank =
+            |v: Option<&str>| v.is_none_or(str::is_empty) || v == field.placeholder.as_deref();
+        // Nothing landed anywhere: the keys never reached the field. Fail, never "ok".
+        if !value.is_empty() && blank(final_value.as_deref()) && blank(row.as_deref()) {
+            return Err(AgentError::CommitNotObserved);
+        }
+        let verified = row.as_deref() == Some(value)
+            || match final_value.as_deref() {
+                Some(actual) => actual == value && field.placeholder.as_deref() != Some(actual),
+                None => false,
+            };
         lock(&self.fill_results).push(verified);
         Ok(())
     }
@@ -1522,37 +1718,55 @@ impl<D: Device> Agent<D> {
                 let Some(frame) = keyboard_frame(&root, screen) else {
                     return Ok(());
                 };
-                let done = root.descendants().into_iter().find(|n| {
-                    n.role.ends_with("Button")
-                        && n.label.as_deref().is_some_and(|s| {
-                            matches!(
-                                s.to_ascii_lowercase().as_str(),
-                                "done" | "return" | "go" | "search" | "next" | "close"
-                            )
+                let gone = || -> Result<bool, AgentError> {
+                    thread::sleep(FOCUS_WAIT);
+                    Ok(keyboard_frame(&self.device.accessibility()?, screen).is_none())
+                };
+                // Only the keyboard's own keys (or its accessory bar just above): the app
+                // may have a "Search" or "Next" button of its own. Keys that only close it
+                // come before keys that also act (submit, search, move on).
+                let nodes = root.descendants();
+                let done = ["done", "close", "return", "go", "search", "next"]
+                    .iter()
+                    .find_map(|want| {
+                        nodes.iter().copied().find(|n| {
+                            n.role.ends_with("Button")
+                                && n.frame[1] >= frame[1] - 120.0
+                                && n.label
+                                    .as_deref()
+                                    .is_some_and(|s| s.eq_ignore_ascii_case(want))
                         })
-                });
+                    });
                 self.mark(None, screen, false);
+                let mut tried = Vec::new();
                 if let Some(button) = done {
                     let (x, y) = button.center();
                     self.device.tap(x / screen.0, y / screen.1);
+                    tried.push(format!(
+                        "its {:?} key",
+                        button.label.as_deref().unwrap_or("")
+                    ));
                 } else {
                     self.device.key("enter");
+                    tried.push("return".to_string());
                 }
-                thread::sleep(FOCUS_WAIT);
-                let root = self.device.accessibility()?;
-                if keyboard_frame(&root, screen).is_some() {
-                    let x = (frame[0] + frame[2] / 2.0) / screen.0;
-                    let y = (frame[1] - 80.0).max(8.0) / screen.1;
-                    self.device.tap(x, y);
-                    thread::sleep(FOCUS_WAIT);
-                    let root = self.device.accessibility()?;
-                    if keyboard_frame(&root, screen).is_some() {
-                        return Err(AgentError::NotReady(
-                            "on-screen keyboard is still visible".into(),
-                        ));
+                if gone()? {
+                    return Ok(());
+                }
+                // A number pad has no key that closes it: tap empty space above it (never
+                // a control). No swipe: on a sheet it drags the sheet away (and its edits).
+                let (els, _) = marks::elements(&self.device.accessibility()?, screen);
+                if let Some(p) = empty_spot(&els, frame, screen) {
+                    self.device.tap(p[0] / screen.0, p[1] / screen.1);
+                    tried.push(format!("a tap on empty space at @{:.0},{:.0}", p[0], p[1]));
+                    if gone()? {
+                        return Ok(());
                     }
                 }
-                Ok(())
+                Err(AgentError::NotReady(format!(
+                    "the keyboard is still up after {}; this screen only closes it from its own controls",
+                    tried.join(", ")
+                )))
             }
             Step::Back { mode } => {
                 let screen = self.screen()?;
@@ -1610,6 +1824,19 @@ impl<D: Device> Agent<D> {
                 self.device.button(Button::Home);
                 Ok(())
             }
+            Step::Screenshot { path } => {
+                let png = self.screenshot()?;
+                let file = match path {
+                    Some(path) => Some(write_screenshot(path, &png)?),
+                    None => None,
+                };
+                lock(&self.screenshots).push(ElementScreenshot {
+                    target: "screen".into(),
+                    png,
+                    file,
+                });
+                Ok(())
+            }
             Step::ScreenshotElement { target } => {
                 let screen = self.screen()?;
                 let rect = self.element_frame(target, screen)?;
@@ -1619,6 +1846,7 @@ impl<D: Device> Agent<D> {
                     .ok_or(AgentError::CommitNotObserved)?;
                 let png = draw::crop(&frame, screen, rect).ok_or(AgentError::CommitNotObserved)?;
                 lock(&self.screenshots).push(ElementScreenshot {
+                    file: None,
                     target: target.clone(),
                     png,
                 });
@@ -1968,7 +2196,24 @@ fn keyboard_frame(root: &AxNode, screen: (f64, f64)) -> Option<[f64; 4]> {
                 && n.label.as_deref().is_some_and(|s| s.chars().count() <= 8)
         })
         .collect();
-    if keys.len() < 8 {
+    // Keys sit in rows of three or more side by side; a lone wide button with a short
+    // label (an app's "Search" row) is not one. The keyboard starts at the top such row.
+    let row_size = |y: f64| {
+        keys.iter()
+            .filter(|k| (k.frame[1] - y).abs() < 4.0 && k.frame[2] < screen.0 / 2.0)
+            .count()
+    };
+    let rows: Vec<f64> = keys
+        .iter()
+        .map(|k| k.frame[1])
+        .filter(|&y| row_size(y) >= 3)
+        .collect();
+    let top = rows.iter().copied().fold(f64::INFINITY, f64::min);
+    let keys: Vec<_> = keys
+        .into_iter()
+        .filter(|k| k.frame[1] >= top - 1.0)
+        .collect();
+    if keys.len() < 8 || rows.len() < 6 {
         return None;
     }
     let x0 = keys
@@ -1988,6 +2233,41 @@ fn keyboard_frame(root: &AxNode, screen: (f64, f64)) -> Option<[f64; 4]> {
         .map(|n| n.frame[1] + n.frame[3])
         .fold(0.0, f64::max);
     Some([x0, y0, x1 - x0, y1 - y0])
+}
+
+/// A point above the keyboard `kb`, below the status and navigation bars, that a tap
+/// should only unfocus: 24 pt clear of every element and 56 pt above or below any text
+/// field (its frame is the text line; its row, which focuses it too, is taller), the
+/// one farthest from a text field. `None` when the screen has no such place.
+fn empty_spot(els: &[Element], kb: [f64; 4], screen: (f64, f64)) -> Option<[f64; 2]> {
+    const MARGIN: f64 = 24.0;
+    const FIELD_MARGIN: f64 = 56.0;
+    let clear = |x: f64, y: f64| {
+        els.iter().all(|e| {
+            let [ex, ey, ew, eh] = e.frame;
+            let my = if e.takes_text() { FIELD_MARGIN } else { MARGIN };
+            x < ex - MARGIN || x > ex + ew + MARGIN || y < ey - my || y > ey + eh + my
+        })
+    };
+    let field_distance = |y: f64| {
+        els.iter()
+            .filter(|e| e.takes_text())
+            .map(|e| (y - (e.frame[1] + e.frame[3] / 2.0)).abs())
+            .fold(f64::INFINITY, f64::min)
+    };
+    let mut best: Option<([f64; 2], f64)> = None;
+    let mut y = kb[1] - 24.0;
+    // Below the status and navigation bars, whose buttons do not always show in the tree.
+    while y > STATUS_BAR + 70.0 {
+        for share in [0.5, 0.15, 0.85] {
+            let x = screen.0 * share;
+            if clear(x, y) && best.is_none_or(|(_, d)| field_distance(y) > d) {
+                best = Some(([x, y], field_distance(y)));
+            }
+        }
+        y -= 24.0;
+    }
+    best.map(|(p, _)| p)
 }
 
 fn alert_info(root: &AxNode) -> Option<AlertInfo> {
@@ -2120,7 +2400,7 @@ fn describe(
                 out.push_str(&format!("+{offscreen} more off screen (scroll to reach)\n"));
             }
             out.push_str(&format!(
-                "targets: refs above; grid cells A1–{rows}{} also work (rows A–{rows} top to bottom, no E; columns 1–{} left to right)\n",
+                "targets: refs above; grid cells A1–{rows}{} also work (rows A–{rows} top to bottom, no E; columns 1–{} left to right; a cell is tapped at its centre); @x,y taps that point\n",
                 grid.cols, grid.cols
             ));
         }
@@ -2133,7 +2413,7 @@ fn describe(
                 out.push_str("no accessible elements on screen; ");
             }
             out.push_str(&format!(
-                "target grid cells: rows A–{rows} top to bottom (no E), columns 1–{} left to right (e.g. C4)\n",
+                "target grid cells: rows A–{rows} top to bottom (no E), columns 1–{} left to right (e.g. C4), tapped at their centre; @x,y taps that point\n",
                 grid.cols
             ));
         }
@@ -2379,7 +2659,7 @@ mod tests {
              e4 button \"Privacy\" (covered: cannot tap)\n\
              e5 textfield \"Search\"\n\
              +1 more off screen (scroll to reach)\n\
-             targets: refs above; grid cells A1–M6 also work (rows A–M top to bottom, no E; columns 1–6 left to right)\n"
+             targets: refs above; grid cells A1–M6 also work (rows A–M top to bottom, no E; columns 1–6 left to right; a cell is tapped at its centre); @x,y taps that point\n"
         );
         let png = s.image.expect("image");
         assert_eq!(&png[1..4], b"PNG");
@@ -2718,7 +2998,11 @@ mod tests {
         let r = a.steps(&steps);
         assert!(r.ok, "{:?}", r.failed);
         assert_eq!(r.completed, 4);
-        assert_eq!(*lock(&a.device.typed), ["ada@example.com", "hunter2"]);
+        // A value up to CODE_MAX long goes one key at a time.
+        assert_eq!(
+            *lock(&a.device.typed),
+            ["ada@example.com", "h", "u", "n", "t", "e", "r", "2"]
+        );
         assert_eq!(r.verified, [true, true]);
         // "Email" matched the text field, not the static label above it.
         assert_eq!(lock(&a.device.taps)[0], (0.5, 122.0 / 800.0));
@@ -2741,6 +3025,111 @@ mod tests {
         assert!(
             !json.contains("never-echo-this"),
             "secret leaked in report: {json}"
+        );
+    }
+
+    #[test]
+    fn a_label_beats_a_field_holding_the_same_text() {
+        let mut field = node("AXTextField", "Code", [20.0, 100.0, 360.0, 44.0], vec![]);
+        field.value = Some("5".into());
+        let screen = node(
+            "AXApplication",
+            "App",
+            [0.0, 0.0, 400.0, 800.0],
+            vec![
+                field,
+                node("AXButton", "5", [137.0, 650.0, 133.0, 54.0], vec![]),
+            ],
+        );
+        let a = Agent::new(Fake::new(screen));
+        let t = a.tap("5", None).unwrap();
+        assert_eq!(t.at, [203.5, 677.0]);
+    }
+
+    #[test]
+    fn point_targets_tap_exactly_there() {
+        assert_eq!(point("@201,816"), Some([201.0, 816.0]));
+        assert_eq!(point("@20.5, 40"), Some([20.5, 40.0]));
+        assert_eq!(point("1,000"), None, "a label with a comma is not a point");
+        assert_eq!(point("@a,b"), None);
+        let a = Agent::new(Fake::new(login()));
+        let t = a.tap("@100,200", None).unwrap();
+        assert_eq!(t.at, [100.0, 200.0]);
+        assert_eq!(lock(&a.device.taps).last(), Some(&(0.25, 0.25)));
+        assert!(matches!(
+            a.tap("@500,10", None),
+            Err(AgentError::NotFound(_))
+        ));
+        let r = a.steps(&[Step::LongPress {
+            target: "@40,80".into(),
+            ms: None,
+        }]);
+        assert!(r.ok, "{:?}", r.failed);
+    }
+
+    #[test]
+    fn fill_types_a_code_one_key_at_a_time_and_fails_when_nothing_lands() {
+        let a = Agent::new(Fake::new(login()));
+        let r = a.steps(&[Step::Fill {
+            target: "Email".into(),
+            value: "123456".into(),
+            secret: false,
+        }]);
+        assert!(r.ok, "{:?}", r.failed);
+        assert_eq!(r.verified, [true]);
+        let typed = lock(&a.device.typed).clone();
+        assert_eq!(typed, ["1", "2", "3", "4", "5", "6"]);
+
+        // Keys that never reach the field fail the step instead of passing it.
+        let a = Agent::new(Fake::new(login()));
+        // Focus lands off the field (the keyboard went to something else).
+        *lock(&a.device.on_tap) = Some(Box::new(|f: &Fake, _x, _y| {
+            *lock(&f.focused) = Some((200.0, 700.0));
+        }));
+        let r = a.steps(&[Step::Fill {
+            target: "Email".into(),
+            value: "123456".into(),
+            secret: false,
+        }]);
+        assert!(!r.ok);
+        assert_eq!(r.failed.unwrap().code, "commit-not-observed");
+    }
+
+    #[test]
+    fn empty_spot_avoids_every_element() {
+        let screen = (400.0, 800.0);
+        let (els, _) = marks::elements(&login(), screen);
+        let kb = [0.0, 500.0, 400.0, 300.0];
+        let p = empty_spot(&els, kb, screen).unwrap();
+        assert!(p[1] < 500.0 && p[1] > STATUS_BAR);
+        for e in &els {
+            let [x, y, w, h] = e.frame;
+            assert!(
+                p[0] < x - 24.0 || p[0] > x + w + 24.0 || p[1] < y - 56.0 || p[1] > y + h + 56.0,
+                "{p:?} is on {:?}",
+                e.name()
+            );
+        }
+    }
+
+    #[test]
+    fn keyboard_dismiss_says_what_it_tried_when_the_keyboard_stays() {
+        let mut screen = login();
+        screen.children.push(node(
+            "AXKeyboard",
+            "Keyboard",
+            [0.0, 500.0, 400.0, 300.0],
+            vec![],
+        ));
+        let a = Agent::new(Fake::new(screen));
+        let r = a.steps(&[Step::KeyboardDismiss]);
+        assert!(!r.ok);
+        let f = r.failed.unwrap();
+        assert_eq!(f.code, "not-ready");
+        assert!(f.error.contains("empty space"), "{}", f.error);
+        assert!(
+            lock(&a.device.swipes).is_empty(),
+            "a swipe can drag a sheet away"
         );
     }
 
@@ -2787,6 +3176,90 @@ mod tests {
         }]);
         assert!(r.ok, "{:?}", r.failed);
         assert_eq!(r.screenshots.len(), 1);
+        assert_eq!(&r.screenshots[0].png[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn screenshot_is_the_plain_screen() {
+        let a = Agent::new(Fake::new(login()));
+        assert!(matches!(a.screenshot(), Err(AgentError::NotReady(_))));
+        *lock(&a.device.frame) = Some(Frame {
+            width: 40,
+            height: 80,
+            source_width: 40,
+            source_height: 80,
+            seq: 1,
+            data: [10u8, 20, 30, 255].repeat(40 * 80),
+        });
+        let png = a.screenshot().unwrap();
+        let mut reader = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        assert_eq!((info.width, info.height), (40, 80));
+        // BGRA (10, 20, 30) comes out as RGB (30, 20, 10): no boxes, no grid drawn over it.
+        let px = info.color_type.samples();
+        assert!(
+            buf[..info.buffer_size()]
+                .chunks(px)
+                .all(|p| p[..3] == [30, 20, 10])
+        );
+    }
+
+    #[test]
+    fn screenshot_step_writes_to_a_path() {
+        let a = Agent::new(Fake::new(login()));
+        *lock(&a.device.frame) = Some(Frame {
+            width: 40,
+            height: 80,
+            source_width: 40,
+            source_height: 80,
+            seq: 1,
+            data: vec![255; 40 * 80 * 4],
+        });
+        let dir = std::env::temp_dir().join(format!("simdriver-shot-step-{}", std::process::id()));
+        let file = dir.join("a").join("shot.png");
+        let steps = vec![
+            Step::Screenshot {
+                path: Some(file.to_string_lossy().into_owned()),
+            },
+            Step::Screenshot {
+                path: Some(format!("{}/b/", dir.display())),
+            },
+        ];
+        let r = a.steps(&steps);
+        assert!(r.ok, "{:?}", r.failed);
+        assert_eq!(r.screenshots[0].file.as_deref(), file.to_str());
+        assert_eq!(std::fs::read(&file).unwrap(), r.screenshots[0].png);
+        let named = std::path::PathBuf::from(r.screenshots[1].file.clone().unwrap());
+        assert_eq!(named.parent(), Some(dir.join("b").as_path()));
+        assert!(named.is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let r = a.steps(&[Step::Screenshot {
+            path: Some(String::new()),
+        }]);
+        assert!(!r.ok);
+        assert_eq!(r.failed.unwrap().code, "invalid");
+    }
+
+    #[test]
+    fn screenshot_step_attaches_the_screen() {
+        let a = Agent::new(Fake::new(login()));
+        *lock(&a.device.frame) = Some(Frame {
+            width: 40,
+            height: 80,
+            source_width: 40,
+            source_height: 80,
+            seq: 1,
+            data: vec![255; 40 * 80 * 4],
+        });
+        let steps: Vec<Step> = serde_json::from_str(r#"[{"action":"screenshot"}]"#).unwrap();
+        let r = a.steps(&steps);
+        assert!(r.ok, "{:?}", r.failed);
+        assert_eq!(r.screenshots.len(), 1);
+        assert_eq!(r.screenshots[0].target, "screen");
         assert_eq!(&r.screenshots[0].png[..8], b"\x89PNG\r\n\x1a\n");
     }
 
