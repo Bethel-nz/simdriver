@@ -61,9 +61,22 @@ class Agent {
   }
 
   async steps(steps) {
-    const report = JSON.parse(await this.#n.steps(JSON.stringify(steps)));
+    const { report: json, sheets, images } = await this.#n.steps(JSON.stringify(steps));
+    const report = JSON.parse(json);
     for (const screenshot of report.screenshots ?? []) screenshot.png = Buffer.from(screenshot.png);
+    const record = report.record;
+    if (record) {
+      record.sheets = images.slice(0, sheets);
+      record.frames.forEach((frame, i) => {
+        frame.png = images[sheets + i];
+      });
+    }
     return report;
+  }
+
+  /** Record the screen around `steps` (none = passively): steps with a leading record step. */
+  record(options, steps = []) {
+    return this.steps([{ action: 'record', ...options }, ...steps]);
   }
 }
 

@@ -189,22 +189,45 @@ impl Task for TapTask {
     }
 }
 
+/// A steps run: the report as JSON (PNGs skipped) plus a recording's images as Buffers,
+/// so a recording's PNGs never travel as JSON number arrays.
+#[napi(object)]
+pub struct JsStepsResult {
+    pub report: String,
+    /// How many leading `images` are contact sheets.
+    pub sheets: u32,
+    /// The record's contact sheets, then its frames in index order (empty without a record).
+    pub images: Vec<Buffer>,
+}
+
 pub struct StepsTask {
     agent: Arc<CoreAgent>,
     steps: Vec<agent::Step>,
 }
 
 impl Task for StepsTask {
-    type Output = String;
-    type JsValue = String;
+    type Output = (String, u32, Vec<Vec<u8>>);
+    type JsValue = JsStepsResult;
 
-    fn compute(&mut self) -> Result<String> {
-        let r = self.agent.steps(&self.steps);
-        serde_json::to_string(&r).map_err(|e| Error::from_reason(e.to_string()))
+    fn compute(&mut self) -> Result<Self::Output> {
+        let mut r = self.agent.steps(&self.steps);
+        let json = serde_json::to_string(&r).map_err(|e| Error::from_reason(e.to_string()))?;
+        let mut images = Vec::new();
+        let mut sheets = 0;
+        if let Some(rec) = r.record.as_mut() {
+            sheets = rec.sheets.len() as u32;
+            images.append(&mut rec.sheets);
+            images.extend(rec.frames.iter_mut().map(|f| std::mem::take(&mut f.png)));
+        }
+        Ok((json, sheets, images))
     }
 
-    fn resolve(&mut self, _env: Env, json: String) -> Result<String> {
-        Ok(json)
+    fn resolve(&mut self, _env: Env, (report, sheets, images): Self::Output) -> Result<JsStepsResult> {
+        Ok(JsStepsResult {
+            report,
+            sheets,
+            images: images.into_iter().map(Buffer::from).collect(),
+        })
     }
 }
 
@@ -256,7 +279,7 @@ impl JsAgent {
     }
 
     /// `steps`: a JSON array of steps (index.js stringifies).
-    #[napi(ts_return_type = "Promise<string>")]
+    #[napi]
     pub fn steps(&self, steps: String) -> Result<AsyncTask<StepsTask>> {
         let steps: Vec<agent::Step> = serde_json::from_str(&steps)
             .map_err(|e| Error::new(Status::InvalidArg, format!("steps: {e}")))?;

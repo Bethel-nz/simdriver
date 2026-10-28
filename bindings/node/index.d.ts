@@ -5,7 +5,22 @@
 export type Snapshot = { text: string; image: Buffer | null; settled: boolean; mode: string; elements: unknown[] } & Record<string, unknown>
 export type TapReport = { target: string; name: string; at: [number, number] }
 export type StepFailure = { index: number; code: string; error: string }
-export type StepsReport = { ok: boolean; completed: number; failed: StepFailure | null; screenshots?: { target: string; png: Buffer }[]; snapshot: { text: string } | null } & Record<string, unknown>
+export type RecordOptions = { timeMs?: number; idleMs?: number; full?: boolean; fps?: number; maxFrames?: number }
+export type Recording = {
+  ended: 'idle' | 'time' | 'stepFailed' | 'error'
+  extended: boolean
+  requestedMs: number
+  durationMs: number
+  actionStartMs: number | null
+  actionEndMs: number | null
+  settledMs: number | null
+  frames: { index: number; tMs: number; change: number; png: Buffer }[]
+  /** Contact sheets (PNG), usually one. */
+  sheets: Buffer[]
+  health: { received: number; sampled: number; skippedByPipeline: number; skippedByRecorder: number; maxGapMs: number; gapsOver34ms: number }
+  error: string | null
+} & Record<string, unknown>
+export type StepsReport = { ok: boolean; completed: number; failed: StepFailure | null; screenshots?: { target: string; png: Buffer }[]; snapshot: { text: string } | null; record?: Recording } & Record<string, unknown>
 
 /**
  * The agent layer over one driver: element refs, annotated screenshots, validated taps,
@@ -18,6 +33,8 @@ export declare class Agent {
   tap(target: string, options?: { expect?: string }): Promise<TapReport>
   /** Steps as an array of action objects; index.js stringifies them for the native side. */
   steps(steps: unknown[]): Promise<StepsReport>
+  /** Record the screen (passively, or around `steps`); the report's `record` has the frames and contact sheets. */
+  record(options: RecordOptions, steps?: unknown[]): Promise<StepsReport>
 }
 export type JsAgent = Agent
 

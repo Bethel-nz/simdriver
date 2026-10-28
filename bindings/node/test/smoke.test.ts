@@ -123,6 +123,17 @@ describe('simdriver', () => {
     }
     expect(code).toBe('not-found');
 
+    // A passive recording: PNGs arrive as Buffers, never JSON number arrays.
+    const rep = await agent.record({ timeMs: 1000 });
+    expect(rep.record !== undefined).toBe(true);
+    const rec = rep.record!;
+    expect(rec.sheets.length).toBeGreaterThan(0);
+    expect(Buffer.isBuffer(rec.sheets[0])).toBe(true);
+    expect(rec.sheets[0].subarray(1, 4).toString()).toBe('PNG');
+    expect(rec.frames.length).toBeGreaterThan(0);
+    expect(Buffer.isBuffer(rec.frames[0].png)).toBe(true);
+    expect(rec.frames[0].png.subarray(1, 4).toString()).toBe('PNG');
+
     const root = await driver.accessibility();
     expect(root.role).toBe('AXApplication');
     expect(root.frame.length).toBe(4);
