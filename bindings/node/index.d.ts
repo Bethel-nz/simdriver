@@ -7,6 +7,8 @@ export type TapReport = { target: string; name: string; at: [number, number] }
 export type StepFailure = { index: number; code: string; error: string }
 export type RecordOptions = { timeMs?: number; idleMs?: number; full?: boolean; fps?: number; maxFrames?: number }
 export type Recording = {
+  /** Where the sheets were written; empty here (only the CLI writes files). */
+  sheetFiles: string[]
   ended: 'idle' | 'time' | 'stepFailed' | 'error'
   extended: boolean
   requestedMs: number
@@ -14,7 +16,8 @@ export type Recording = {
   actionStartMs: number | null
   actionEndMs: number | null
   settledMs: number | null
-  frames: { index: number; tMs: number; change: number; png: Buffer }[]
+  /** `file`: where the PNG was written; null here (only the CLI writes files). */
+  frames: { index: number; tMs: number; change: number; png: Buffer; file: string | null }[]
   /** Contact sheets (PNG), usually one. */
   sheets: Buffer[]
   health: { received: number; sampled: number; skippedByPipeline: number; skippedByRecorder: number; maxGapMs: number; gapsOver34ms: number }

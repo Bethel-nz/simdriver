@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from './runner.ts';
 import { Driver, Grid, listApps, listDevices } from '../index.js';
@@ -61,6 +62,33 @@ describe('simdriver', () => {
     expect(c !== null && g.at(c.x, c.y) === 'C4').toBe(true);
     expect(g.center('O1')).toBe(null);
     expect(g.center('E1')).toBe(null);
+  });
+
+  test('agent.record puts the record action last, over any action in options', async () => {
+    // A stand-in native Agent (index.js reads native.Agent when agent() is first called).
+    const native = createRequire(import.meta.url)(
+      join(here, '..', `simdriver.${process.platform}-${process.arch}.node`),
+    );
+    const real = native.Agent;
+    let sent = '';
+    native.Agent = class {
+      async steps(json: string) {
+        sent = json;
+        return { report: '{"ok":true,"completed":1,"failed":null,"snapshot":null}', sheets: 0, images: [] };
+      }
+    };
+    try {
+      const agent = new (Driver as unknown as new (n: unknown) => Driver)({}).agent();
+      await agent.record({ timeMs: 800, action: 'tap' } as unknown as { timeMs: number }, [
+        { action: 'tap', target: 'Save' },
+      ]);
+    } finally {
+      native.Agent = real;
+    }
+    const steps = JSON.parse(sent);
+    expect(steps[0].action).toBe('record');
+    expect(steps[0].timeMs).toBe(800);
+    expect(steps[1].target).toBe('Save');
   });
 
   test('Driver.start({}) accepts missing options (no null reaches napi)', async () => {

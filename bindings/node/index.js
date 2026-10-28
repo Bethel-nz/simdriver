@@ -76,7 +76,7 @@ class Agent {
 
   /** Record the screen around `steps` (none = passively): steps with a leading record step. */
   record(options, steps = []) {
-    return this.steps([{ action: 'record', ...options }, ...steps]);
+    return this.steps([{ ...options, action: 'record' }, ...steps]);
   }
 }
 
