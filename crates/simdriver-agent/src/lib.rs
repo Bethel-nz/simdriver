@@ -16,9 +16,11 @@
 //! The agent drives any [`Device`]; [`simdriver::Driver`] is one.
 pub mod draw;
 mod marks;
+mod record;
 mod steps;
 
 pub use marks::{Element, Visibility};
+pub use record::*;
 pub use steps::{Step, StepFailure, SwipeTarget};
 
 use serde::{Deserialize, Serialize};
@@ -63,6 +65,12 @@ pub trait Device: Send + Sync {
     fn accessibility(&self) -> Result<AxNode, simdriver::Error>;
     fn screen_points(&self) -> Option<(f64, f64)>;
     fn capture(&self, wait: Duration) -> Option<Frame>;
+    /// A sampled stream of the frames that arrive from now on, at most `fps` a second,
+    /// for [`Recorder`]. `None` when the device cannot stream (the default).
+    fn frame_tap(&self, fps: u32) -> Option<simdriver::FrameTap> {
+        let _ = fps;
+        None
+    }
     /// A tap at (x, y) in 0..1 of the screen.
     fn tap(&self, x: f64, y: f64);
     /// Two taps at (x, y) in 0..1 of the screen.
@@ -181,6 +189,9 @@ impl Device for Driver {
     fn capture(&self, wait: Duration) -> Option<Frame> {
         Driver::capture(self, wait)
     }
+    fn frame_tap(&self, fps: u32) -> Option<simdriver::FrameTap> {
+        Driver::frame_tap(self, fps)
+    }
     fn tap(&self, x: f64, y: f64) {
         Driver::tap(self, x, y)
     }
@@ -265,6 +276,9 @@ impl<D: Device + ?Sized> Device for Arc<D> {
     }
     fn capture(&self, wait: Duration) -> Option<Frame> {
         (**self).capture(wait)
+    }
+    fn frame_tap(&self, fps: u32) -> Option<simdriver::FrameTap> {
+        (**self).frame_tap(fps)
     }
     fn tap(&self, x: f64, y: f64) {
         (**self).tap(x, y)
@@ -528,14 +542,19 @@ fn tree_key(root: &AxNode, els: &[Element]) -> TreeKey {
 
 /// Mean colour (R, G, B) over a coarse grid of the frame.
 fn fingerprint(f: &Frame) -> Vec<[u8; 3]> {
+    fingerprint_with(f, PRINT, 4)
+}
+
+/// Mean colour (R, G, B) over `cols × rows` cells, reading every `step`th pixel each way.
+fn fingerprint_with(f: &Frame, (cols, rows): (usize, usize), step: usize) -> Vec<[u8; 3]> {
     let (w, h) = (f.width as usize, f.height as usize);
-    let (cols, rows) = PRINT;
+    let step = step.max(1);
     let mut out = Vec::with_capacity(cols * rows);
     for r in 0..rows {
         for c in 0..cols {
             let (mut sum, mut n) = ([0u64; 3], 0u64);
-            for y in (r * h / rows..(r + 1) * h / rows).step_by(4) {
-                for x in (c * w / cols..(c + 1) * w / cols).step_by(4) {
+            for y in (r * h / rows..(r + 1) * h / rows).step_by(step) {
+                for x in (c * w / cols..(c + 1) * w / cols).step_by(step) {
                     if let Some(p) = f.data.get((y * w + x) * 4..(y * w + x) * 4 + 3) {
                         for (s, v) in sum.iter_mut().zip([p[2], p[1], p[0]]) {
                             *s += u64::from(v);
@@ -2076,8 +2095,9 @@ mod tests {
     type Touch2 = (simdriver::Phase, (f64, f64), (f64, f64));
 
     /// A scripted device: `screen` is what accessibility reads; taps and typing are logged,
-    /// and `on_tap` can change the screen (navigation).
-    struct Fake {
+    /// and `on_tap` can change the screen (navigation). `feed` plays a frame arriving
+    /// from the stream: the newest frame `capture` returns, offered to an open tap.
+    pub(crate) struct Fake {
         screen: Mutex<AxNode>,
         taps: Mutex<Vec<(f64, f64)>>,
         double_taps: Mutex<Vec<(f64, f64)>>,
@@ -2089,13 +2109,17 @@ mod tests {
         reads: AtomicU64,
         on_tap: Mutex<Option<OnTap>>,
         on_button: Mutex<Option<OnButton>>,
-        frame: Mutex<Option<Frame>>,
+        pub(crate) frame: Mutex<Option<Frame>>,
         focused: Mutex<Option<(f64, f64)>>,
         selected: AtomicBool,
+        /// The feeder of the last tap opened; set to `None` to close the stream.
+        pub(crate) tap: Mutex<Option<simdriver::TapFeeder>>,
+        /// `frame_tap` returns `None` (a device that cannot record).
+        pub(crate) tapless: AtomicBool,
     }
 
     impl Fake {
-        fn new(screen: AxNode) -> Fake {
+        pub(crate) fn new(screen: AxNode) -> Fake {
             Fake {
                 screen: Mutex::new(screen),
                 taps: Mutex::default(),
@@ -2111,7 +2135,16 @@ mod tests {
                 frame: Mutex::new(None),
                 focused: Mutex::new(None),
                 selected: AtomicBool::new(false),
+                tap: Mutex::new(None),
+                tapless: AtomicBool::new(false),
             }
+        }
+        /// A frame arriving at `at`: offered to the open tap, then the newest frame.
+        pub(crate) fn feed(&self, at: Instant, frame: Frame) {
+            if let Some(feeder) = lock(&self.tap).as_ref() {
+                feeder.offer(at, &frame);
+            }
+            *lock(&self.frame) = Some(frame);
         }
         fn set(&self, screen: AxNode) {
             *lock(&self.screen) = screen;
@@ -2142,6 +2175,14 @@ mod tests {
         }
         fn capture(&self, _: Duration) -> Option<Frame> {
             lock(&self.frame).clone()
+        }
+        fn frame_tap(&self, fps: u32) -> Option<simdriver::FrameTap> {
+            if self.tapless.load(Ordering::SeqCst) {
+                return None;
+            }
+            let (tap, feeder) = simdriver::FrameTap::manual(fps);
+            *lock(&self.tap) = Some(feeder);
+            Some(tap)
         }
         fn tap(&self, x: f64, y: f64) {
             lock(&self.taps).push((x, y));
