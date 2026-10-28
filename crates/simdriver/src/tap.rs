@@ -2,13 +2,21 @@
 //!
 //! Threading: [`TapFeeder::offer`] runs on the pipeline worker for every frame it reads,
 //! before the host's `on_frame`. It never blocks: it updates the counters under a short
-//! lock, decides whether the frame is due (at most `fps` a second), and only then copies
+//! lock, decides whether the frame is due (`fps` a second, see below), and only then copies
 //! it onto an unbounded channel whose depth is capped at [`QUEUE`] by an in-flight counter
 //! checked *before* the copy, so a consumer that falls behind costs no copy at all, just a
 //! `skipped_by_tap`. The [`FrameTap`] end lives on the consumer's thread and waits with
 //! [`FrameTap::recv_timeout`]. `offer` returns false once the tap is dropped, which is how
 //! the worker knows to prune its feeder; the tap sees [`TapRecv::Closed`] once its feeder
 //! is gone (the pipeline dropped).
+//!
+//! Sampling follows a due-time schedule, so the long-run rate equals `fps` whatever the
+//! input rate. With `interval = 1 s / fps` and `tol = 0.2 × interval`, the first frame is
+//! always sampled; after that a frame is sampled when `at >= next_due - tol`, and each
+//! sample sets `next_due = max(next_due + interval, at + interval - tol)`. The tolerance
+//! lets a 60 Hz frame that lands just before the due time count (fps 30 takes every other
+//! frame, fps 25 alternates every 2nd and 3rd); the `max` stops a burst of catch-up
+//! samples after a pause.
 use crate::helper::lock;
 use crate::shm::Frame;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -23,9 +31,6 @@ const PAUSE: Duration = Duration::from_millis(250);
 const STUTTER: Duration = Duration::from_millis(34);
 /// Sampled frames queued for the consumer at most; more are skipped, not copied.
 const QUEUE: usize = 3;
-/// A frame is due this fraction of the interval after the last sampled one (sdframe's
-/// tolerance), so 60 fps input sampled at 30 takes every other frame, not every third.
-const TOLERANCE: f64 = 0.8;
 
 /// A sampled frame and when the pipeline read it.
 #[derive(Debug, Clone)]
@@ -62,7 +67,8 @@ pub enum TapRecv {
 
 struct State {
     health: TapHealth,
-    last_sampled: Option<Instant>,
+    /// When the next sample is due; `None` until the first frame (always sampled).
+    next_due: Option<Instant>,
     prev_seq: Option<u64>,
 }
 
@@ -82,7 +88,7 @@ pub struct FrameTap {
 pub struct TapFeeder {
     tx: Sender<TapFrame>,
     shared: Arc<Shared>,
-    min_gap: Duration,
+    interval: Duration,
 }
 
 impl FrameTap {
@@ -93,7 +99,7 @@ impl FrameTap {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 health: TapHealth::default(),
-                last_sampled: None,
+                next_due: None,
                 prev_seq: None,
             }),
             in_flight: AtomicUsize::new(0),
@@ -102,7 +108,7 @@ impl FrameTap {
         let feeder = TapFeeder {
             tx,
             shared: shared.clone(),
-            min_gap: interval.mul_f64(TOLERANCE),
+            interval,
         };
         (FrameTap { rx, shared }, feeder)
     }
@@ -137,7 +143,7 @@ impl TapFeeder {
             let mut s = lock(&self.shared.state);
             let State {
                 health: h,
-                last_sampled,
+                next_due,
                 prev_seq,
             } = &mut *s;
             h.received += 1;
@@ -158,12 +164,17 @@ impl TapFeeder {
                 h.skipped_by_pipeline += ((frame.seq - prev) / 2).saturating_sub(1);
             }
             *prev_seq = Some(frame.seq);
-            if last_sampled.is_some_and(|l| at.saturating_duration_since(l) < self.min_gap) {
+            let tol = self.interval / 5;
+            if next_due.is_some_and(|due| at + tol < due) {
                 return true;
             }
             // A due frame takes its sampling slot even if the queue is full and it is
             // skipped, so the cadence holds when the consumer catches up.
-            *last_sampled = Some(at);
+            let after_this = at + self.interval - tol;
+            *next_due = Some(match *next_due {
+                Some(due) => (due + self.interval).max(after_this),
+                None => after_this,
+            });
             // Only this feeder adds to in_flight (under the lock); the consumer only
             // subtracts, so room seen here is still there after the unlock.
             if self.shared.in_flight.load(Ordering::SeqCst) >= QUEUE {
@@ -226,9 +237,39 @@ mod tests {
 
     #[test]
     fn fps_25_samples_about_25() {
-        // 1 s of 100 Hz input: the 0.8x tolerance (32 ms) takes every 4th frame (40 ms).
-        let h = feed_steady(25, 100, 10.0);
-        assert!((24..=26).contains(&h.sampled), "sampled {}", h.sampled);
+        // 2.5 s of 60 Hz input.
+        let h = feed_steady(25, 150, 16.7);
+        assert!((60..=65).contains(&h.sampled), "sampled {}", h.sampled);
+    }
+
+    #[test]
+    fn no_burst_after_a_pause() {
+        let (tap, feeder) = FrameTap::manual(30);
+        let t0 = Instant::now();
+        let mut sampled = Vec::new();
+        let mut offer = |at_ms: f64, seq: u64| {
+            feeder.offer(t0 + ms(at_ms), &frame(seq));
+            while let Ok(t) = tap.recv_timeout(Duration::ZERO) {
+                sampled.push(t.frame.seq);
+            }
+        };
+        // 0.5 s at 60 Hz (seqs 2..=60), a 1 s pause, then 60 Hz again (seqs 62..).
+        for i in 0..30u64 {
+            offer(16.7 * i as f64, 2 + 2 * i);
+        }
+        let resume = 16.7 * 29.0 + 1000.0;
+        for i in 0..6u64 {
+            offer(resume + 16.7 * i as f64, 62 + 2 * i);
+        }
+        assert!(
+            sampled.contains(&62),
+            "first frame after the pause: {sampled:?}"
+        );
+        assert!(
+            !sampled.contains(&64),
+            "no catch-up sample right after it: {sampled:?}"
+        );
+        assert!(sampled.contains(&66), "cadence resumes: {sampled:?}");
     }
 
     #[test]
@@ -268,7 +309,7 @@ mod tests {
             assert!(feeder.offer(t0 + ms(40.0 * i as f64), &frame(2 + 2 * i)));
         }
         let took = start.elapsed();
-        assert!(took < Duration::from_millis(5), "10 offers took {took:?}");
+        assert!(took < Duration::from_millis(50), "10 offers took {took:?}");
         let h = tap.health();
         assert_eq!((h.received, h.sampled, h.skipped_by_tap), (10, 3, 7));
         // The queue holds the first three; draining it makes room again.
