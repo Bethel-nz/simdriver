@@ -36,7 +36,10 @@ pub use grid::Grid;
 pub use protocol::Phase;
 pub use shm::Frame;
 pub use stats::Stats;
-pub use tap::{FrameTap, TapFeeder, TapFrame, TapHealth, TapRecv};
+pub use tap::{FrameTap, TapFrame, TapHealth, TapRecv};
+// A test seam for the agent's tests and fakes; not part of the supported API.
+#[doc(hidden)]
+pub use tap::TapFeeder;
 
 #[doc(hidden)]
 pub mod __internal {

@@ -84,7 +84,9 @@ pub struct FrameTap {
     shared: Arc<Shared>,
 }
 
-/// The producer end, owned by the pipeline worker (or a test).
+/// The producer end, owned by the pipeline worker (or a test). A test seam: public so
+/// the agent's tests and fakes can feed a tap, not part of the supported API.
+#[doc(hidden)]
 pub struct TapFeeder {
     tx: Sender<TapFrame>,
     shared: Arc<Shared>,
@@ -93,7 +95,8 @@ pub struct TapFeeder {
 
 impl FrameTap {
     /// A tap and its feeder, not attached to any pipeline: whoever holds the feeder
-    /// offers the frames. `fps` is clamped to 1..=60.
+    /// offers the frames. `fps` is clamped to 1..=60. A test seam (see [`TapFeeder`]).
+    #[doc(hidden)]
     pub fn manual(fps: u32) -> (FrameTap, TapFeeder) {
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Shared {
