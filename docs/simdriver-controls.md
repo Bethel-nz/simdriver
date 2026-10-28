@@ -35,6 +35,7 @@ Pass these actions to `Agent.steps()`:
 | `back` | Navigate with the system edge gesture or an in-app back control. |
 | `appSwitcher` | Open the app switcher with a double Home-button press. |
 | `screenshotElement` | Return a cropped PNG of a target element. |
+| `record` | Record the screen over the steps that follow; first step only. See Record. |
 | `alert` | Get, wait for, accept, or dismiss a visible system alert. Dismiss uses known safe button labels only. |
 
 Example:
@@ -48,6 +49,31 @@ const result = await agent.steps([
 ```
 
 The step report includes completion/failure details, fill verification, clipboard reads, screenshots, alert details, and the latest snapshot.
+
+## Record
+
+Use `record` when the result of a step shows up over time: a transition, a toast, a spinner, a stutter. It records the screen around the steps and returns a contact sheet plus a few timed full-size frames. Read the sheet first, then fetch frames by index.
+
+```ts
+const report = await agent.record({ timeMs: 5000 }, [{ action: 'tap', target: 'Save' }]);
+const { sheets, frames, ended, settledMs, health } = report.record;
+```
+
+`agent.record(options, steps?)` is `agent.steps([{ action: 'record', ...options }, ...steps])`; with no steps it only watches. CLI: `simdriver agent record [--time 5s] [--idle-ms 400] [--full] [--fps 30] [--max-frames 24] [--out dir] [-- tap <target> | -- steps <json | @file>]`. `record` is valid only as the first step and covers the whole run; anywhere else (or twice) the run fails with `invalid` before any step runs.
+
+| Option | CLI | Default | Limits |
+| --- | --- | --- | --- |
+| `timeMs` | `--time` (`5s`, `800ms`, bare ms) | 5000 | at most 30000 |
+| `idleMs` | `--idle-ms` | 400 | 50 to 5000 |
+| `full` | `--full` | false | record the whole time instead of ending when still |
+| `fps` | `--fps` | 30 | 25 to 30 |
+| `maxFrames` | `--max-frames` | 24 | at least 2 |
+
+**When it ends.** After the actions finish, the recording ends once the screen has been still for `idleMs` (`ended: "idle"`). `timeMs` caps it (`"time"`). If the actions are still running at `timeMs`, the recording extends until they finish (`extended: true`), then ends the normal way: still, or `timeMs` after the actions ended. With `full` it records the whole `timeMs`, or until the actions finish if later. A failed step ends it `idleMs` later with `"stepFailed"`; a lost frame stream ends it with `"error"` and `error` set. A recording is never thrown away: failure still returns it.
+
+**Sampling limit.** The recorder looks at 25 to 30 frames a second (default 30), so a change shorter than one sample (about 33 ms) can be missed. For a brief flash, hold the state longer (for example a long press) or record more than once.
+
+**Output.** `report.record` has the contact `sheets` (PNG Buffers, usually one, thumbnails 180 px wide), kept `frames` (`index`, `tMs`, `change`, `png`), and the manifest fields `ended`, `extended`, `requestedMs`, `durationMs`, `actionStartMs`, `actionEndMs`, `settledMs` (the last change; `null` means still changing when it ended), `health` (`received`, `sampled`, `skippedByPipeline`, `skippedByRecorder`, `maxGapMs`, `gapsOver34ms`: a stutter is reported, not just seen) and `error`. All times are milliseconds from the baseline frame at `t = 0`. Only changed frames are kept, thinned to `maxFrames`. The CLI writes `sheet-N.png`, `frame-<index>-<t>ms.png` and `record.json` to `--out` (default `~/.cache/simdriver/records/<udid>-<time>/`) and prints the manifest with those paths; it exits 1 when the recording ended in `error`.
 
 ## Driver controls
 

@@ -83,6 +83,7 @@ simdriver devices
 simdriver agent snapshot --image shot.png   # elements numbered e1, e2… + annotated shot
 simdriver agent tap e4                      # validated against the live screen first
 simdriver agent steps '[{"action":"tap","target":"Log in"},{"action":"waitFor","text":"Welcome"}]'
+simdriver agent record -- tap "Save"        # contact sheet + timed frames of what the tap sets off
 simdriver set permission grant photos com.example.app
 simdriver reset app-data com.example.app
 ```
