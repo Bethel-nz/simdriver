@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use simdriver::DeviceSelector;
 use simdriver::{self as sd, Device};
-use simdriver_agent::{Agent, SnapshotOptions, Step};
+use simdriver_agent::{Agent, Ended, RecordOptions, Recording, SnapshotOptions, Step, StepsReport};
 
 const USAGE: &str = "Drive an iOS simulator from the command line.
 
@@ -21,7 +21,14 @@ Devices:
 The screen, through the agent layer:
   agent snapshot [--settle-ms N] [--grid] [--cols N] [--image <path>]
   agent tap <target> [--expect <text>]
-  agent steps <json | @file>
+  agent steps <json | @file> [--out <dir>]
+  agent record [--time <dur>] [--idle-ms N] [--full] [--fps N] [--max-frames N]
+               [--out <dir>] [-- tap <target> | -- steps <json | @file>]
+      Record what the screen does around the actions after `--` (none: just watch).
+      <dur> is 5s, 1.5s, 800ms or a bare number of ms (default 5s, at most 30s).
+      Writes sheet-N.png, frame-<n>-<t>ms.png and record.json to --out (default
+      ~/.cache/simdriver/records/<udid>-<time>/); the report on stdout lists them.
+      A steps run whose first step is `record` is recorded the same way.
 
 Apps and simulator state:
   launch <bundle> | terminate <bundle> | open-url <url>
@@ -96,7 +103,18 @@ impl From<sd::Error> for CliError {
 }
 
 /// Flags that take a value; everything else `--flag`-shaped is boolean.
-const VALUE_FLAGS: [&str; 5] = ["--udid", "--expect", "--image", "--cols", "--settle-ms"];
+const VALUE_FLAGS: [&str; 10] = [
+    "--udid",
+    "--expect",
+    "--image",
+    "--cols",
+    "--settle-ms",
+    "--time",
+    "--idle-ms",
+    "--fps",
+    "--max-frames",
+    "--out",
+];
 
 /// Positional words and named flags, with unknown flags rejected.
 struct Args {
@@ -351,7 +369,7 @@ fn set_command(rest: &[String]) -> Result<(), CliError> {
 fn agent_command(rest: &[String]) -> Result<(), CliError> {
     let action = rest
         .first()
-        .ok_or_else(|| CliError::Usage("agent snapshot|tap|steps".into()))?;
+        .ok_or_else(|| CliError::Usage("agent snapshot|tap|steps|record".into()))?;
     let rest = &rest[1..];
     match action.as_str() {
         "snapshot" => {
@@ -378,10 +396,8 @@ fn agent_command(rest: &[String]) -> Result<(), CliError> {
             opts.grid = args.bool("--grid");
             let snapshot = agent.snapshot(&opts).map_err(|e| e.to_string())?;
             save_state(&agent, &udid);
-            if let Some(path) = args.flag("--image") {
-                if let Some(png) = &snapshot.image {
-                    std::fs::write(path, png)?;
-                }
+            if let (Some(path), Some(png)) = (args.flag("--image"), &snapshot.image) {
+                std::fs::write(path, png)?;
             }
             if args.bool("--json") {
                 println!("{}", serde_json::to_string_pretty(&snapshot)?);
@@ -423,55 +439,245 @@ fn agent_command(rest: &[String]) -> Result<(), CliError> {
             Ok(())
         }
         "steps" => {
-            let args = parse_args(rest, &["--udid"])?;
+            let args = parse_args(rest, &["--udid", "--out"])?;
             let udid = pick_booted(args.flag("--udid"))?;
             let input = args.word(0, "a JSON array of steps, or @file")?;
-            let json = if let Some(file) = input.strip_prefix('@') {
-                std::fs::read_to_string(file).map_err(|e| format!("could not read {file}: {e}"))?
-            } else {
-                input
-            };
-            let steps: Vec<Step> =
-                serde_json::from_str(&json).map_err(|e| format!("the steps are not valid: {e}"))?;
+            let steps = parse_steps_input(&input)?;
+            let out = args.flag("--out").map(PathBuf::from);
             let driver = start_driver(&udid)?;
             let agent = Agent::new(driver);
             if !args.bool("--fresh") {
                 restore_state(&agent, &udid);
             }
             let report = agent.steps(&steps);
-            save_state(&agent, &udid);
-            let dir = state_dir()?;
-            let mut value = serde_json::to_value(&report)?;
-            if let Some(shots) = value.get_mut("screenshots").and_then(|v| v.as_array_mut()) {
-                for (index, (shot, taken)) in shots.iter_mut().zip(&report.screenshots).enumerate()
-                {
-                    let path = dir.join(format!(
-                        "shot-{}-{index}-{}.png",
-                        udid_short(&udid),
-                        taken.target.replace(['/', ' ', '"'], "_")
-                    ));
-                    std::fs::write(&path, &taken.png)?;
-                    shot["png"] = serde_json::Value::String(path.to_string_lossy().into());
-                }
-            }
-            let ok = report.ok;
-            println!("{}", serde_json::to_string_pretty(&value)?);
-            agent.device().stop();
-            if ok {
-                Ok(())
-            } else {
-                Err(CliError::Fail(format!(
-                    "step {} failed: {}",
-                    report.failed.as_ref().map(|f| f.index).unwrap_or(0),
-                    report
-                        .failed
-                        .as_ref()
-                        .map(|f| f.error.clone())
-                        .unwrap_or_default()
-                )))
-            }
+            finish_run(&agent, &udid, report, out)
         }
-        _ => Err(CliError::Usage("agent snapshot|tap|steps".into())),
+        "record" => {
+            let (head, tail) = split_double_dash(rest);
+            let args = parse_args(
+                head,
+                &[
+                    "--udid",
+                    "--time",
+                    "--idle-ms",
+                    "--full",
+                    "--fps",
+                    "--max-frames",
+                    "--out",
+                ],
+            )?;
+            if let Some(extra) = args.words.first() {
+                return Err(CliError::Usage(format!(
+                    "unexpected {extra}; put the actions after --"
+                )));
+            }
+            let opts = record_options(&args)?;
+            let steps = parse_record_tail(tail)?;
+            let out = args.flag("--out").map(PathBuf::from);
+            let udid = pick_booted(args.flag("--udid"))?;
+            let driver = start_driver(&udid)?;
+            let agent = Agent::new(driver);
+            if !args.bool("--fresh") {
+                restore_state(&agent, &udid);
+            }
+            let report = agent.record(opts, &steps);
+            finish_run(&agent, &udid, report, out)
+        }
+        _ => Err(CliError::Usage("agent snapshot|tap|steps|record".into())),
+    }
+}
+
+/// The steps from a JSON array or `@file`.
+fn parse_steps_input(input: &str) -> Result<Vec<Step>, CliError> {
+    let json = if let Some(file) = input.strip_prefix('@') {
+        std::fs::read_to_string(file).map_err(|e| format!("could not read {file}: {e}"))?
+    } else {
+        input.to_string()
+    };
+    Ok(serde_json::from_str(&json).map_err(|e| format!("the steps are not valid: {e}"))?)
+}
+
+/// Arguments before and after the first `--`.
+fn split_double_dash(args: &[String]) -> (&[String], &[String]) {
+    match args.iter().position(|a| a == "--") {
+        Some(i) => (&args[..i], &args[i + 1..]),
+        None => (args, &[]),
+    }
+}
+
+/// `5s`, `1.5s`, `800ms`, or a bare number of milliseconds.
+fn parse_duration(text: &str) -> Result<Duration, CliError> {
+    let bad = || {
+        CliError::Usage(format!(
+            "{text:?} is not a duration; use 5s, 1.5s, 800ms or ms"
+        ))
+    };
+    let (number, unit_ms) = if let Some(n) = text.strip_suffix("ms") {
+        (n, 1.0)
+    } else if let Some(n) = text.strip_suffix('s') {
+        (n, 1000.0)
+    } else {
+        (text, 1.0)
+    };
+    if number.is_empty() || !number.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return Err(bad());
+    }
+    let value: f64 = number.parse().map_err(|_| bad())?;
+    if !value.is_finite() {
+        return Err(bad());
+    }
+    Ok(Duration::from_millis((value * unit_ms).round() as u64))
+}
+
+fn record_options(args: &Args) -> Result<RecordOptions, CliError> {
+    let mut opts = RecordOptions::default();
+    if let Some(t) = args.flag("--time") {
+        opts.time = parse_duration(t)?;
+    }
+    if let Some(ms) = args.flag("--idle-ms") {
+        opts.idle =
+            Duration::from_millis(ms.parse().map_err(|_| {
+                CliError::Usage("--idle-ms must be a number of milliseconds".into())
+            })?);
+    }
+    if let Some(n) = args.flag("--fps") {
+        opts.fps = n
+            .parse()
+            .map_err(|_| CliError::Usage("--fps must be a number".into()))?;
+    }
+    if let Some(n) = args.flag("--max-frames") {
+        opts.max_frames = n
+            .parse()
+            .map_err(|_| CliError::Usage("--max-frames must be a number".into()))?;
+    }
+    opts.full = args.bool("--full");
+    Ok(opts)
+}
+
+/// What follows `--` in `agent record`: nothing, `tap <target>`, or `steps <json|@file>`.
+fn parse_record_tail(tail: &[String]) -> Result<Vec<Step>, CliError> {
+    let Some(command) = tail.first() else {
+        return Ok(Vec::new());
+    };
+    let rest = &tail[1..];
+    match command.as_str() {
+        "tap" => {
+            let args = parse_args(rest, &["--expect"])?;
+            if args.flag("--expect").is_some() {
+                return Err(CliError::Usage(
+                    "--expect is not supported under record; use steps with an expect step".into(),
+                ));
+            }
+            let target = args.word(0, "a target: e4, a label, or a grid cell")?;
+            Ok(vec![Step::Tap { target }])
+        }
+        "steps" => {
+            let args = parse_args(rest, &[])?;
+            parse_steps_input(&args.word(0, "a JSON array of steps, or @file")?)
+        }
+        other => Err(CliError::Usage(format!(
+            "after -- expected tap or steps, not {other}"
+        ))),
+    }
+}
+
+/// `frame-<index:02>-<t_ms>ms.png`.
+fn frame_file_name(index: usize, t_ms: u64) -> String {
+    format!("frame-{index:02}-{t_ms}ms.png")
+}
+
+fn unix_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+/// Write the sheets, frames and `record.json` into `dir` (created if missing; same-named
+/// files are overwritten, nothing is deleted), filling in the absolute paths on `recording`.
+fn write_recording(dir: &std::path::Path, recording: &mut Recording) -> Result<(), CliError> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    let dir = std::path::absolute(dir)?;
+    let path_text = |name: &str| dir.join(name).to_string_lossy().into_owned();
+    recording.sheet_files.clear();
+    for (i, sheet) in recording.sheets.iter().enumerate() {
+        let name = format!("sheet-{}.png", i + 1);
+        std::fs::write(dir.join(&name), sheet)?;
+        recording.sheet_files.push(path_text(&name));
+    }
+    for frame in &mut recording.frames {
+        let name = frame_file_name(frame.index, frame.t_ms);
+        std::fs::write(dir.join(&name), &frame.png)?;
+        frame.file = Some(path_text(&name));
+    }
+    std::fs::write(
+        dir.join("record.json"),
+        serde_json::to_string_pretty(&recording)?,
+    )?;
+    Ok(())
+}
+
+/// The default output directory: `<cache>/simdriver/records/<udid>-<unix_ms>/`.
+fn default_record_dir(udid: &str) -> Result<PathBuf, CliError> {
+    Ok(state_dir()?
+        .join("records")
+        .join(format!("{}-{}", udid_short(udid), unix_ms())))
+}
+
+/// Save state, write screenshots and any recording, print the report, stop the driver,
+/// and turn a failed run into an error.
+fn finish_run(
+    agent: &Agent<sd::Driver>,
+    udid: &str,
+    mut report: StepsReport,
+    out: Option<PathBuf>,
+) -> Result<(), CliError> {
+    save_state(agent, udid);
+    let dir = state_dir()?;
+    let mut write_error = None;
+    if let Some(recording) = report.record.as_mut() {
+        let target = match out {
+            Some(path) => Ok(path),
+            None => default_record_dir(udid),
+        };
+        if let Err(e) = target.and_then(|d| write_recording(&d, recording)) {
+            write_error = Some(e);
+        }
+    }
+    let mut value = serde_json::to_value(&report)?;
+    if let Some(shots) = value.get_mut("screenshots").and_then(|v| v.as_array_mut()) {
+        for (index, (shot, taken)) in shots.iter_mut().zip(&report.screenshots).enumerate() {
+            let path = dir.join(format!(
+                "shot-{}-{index}-{}.png",
+                udid_short(udid),
+                taken.target.replace(['/', ' ', '"'], "_")
+            ));
+            std::fs::write(&path, &taken.png)?;
+            shot["png"] = serde_json::Value::String(path.to_string_lossy().into());
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    agent.device().stop();
+    if let Some(e) = write_error {
+        return Err(e);
+    }
+    if !report.ok {
+        return Err(CliError::Fail(format!(
+            "step {} failed: {}",
+            report.failed.as_ref().map(|f| f.index).unwrap_or(0),
+            report
+                .failed
+                .as_ref()
+                .map(|f| f.error.clone())
+                .unwrap_or_default()
+        )));
+    }
+    match &report.record {
+        Some(recording) if recording.ended == Ended::Error => Err(CliError::Fail(format!(
+            "the recording ended in error: {}",
+            recording.error.clone().unwrap_or_default()
+        ))),
+        _ => Ok(()),
     }
 }
 
@@ -534,9 +740,9 @@ fn restore_state(agent: &Agent<sd::Driver>, udid: &str) {
     let Ok(text) = std::fs::read_to_string(&path) else {
         return;
     };
-    match serde_json::from_str(&text) {
-        Ok(state) => agent.restore(state),
-        Err(_) => {} // a state from another version: start fresh rather than fail
+    // A state from another version is ignored: start fresh rather than fail.
+    if let Ok(state) = serde_json::from_str(&text) {
+        agent.restore(state);
     }
 }
 
@@ -578,5 +784,129 @@ mod tests {
     #[test]
     fn value_flag_must_apply() {
         assert!(parse_args(&["devices".into(), "--expect".into(), "x".into()], &[]).is_err());
+    }
+
+    fn test_recording(byte: u8, frames: Vec<simdriver_agent::RecordedFrame>) -> Recording {
+        Recording {
+            ended: Ended::Idle,
+            extended: false,
+            requested_ms: 5000,
+            duration_ms: 900,
+            action_start_ms: Some(100),
+            action_end_ms: Some(200),
+            settled_ms: Some(600),
+            frames,
+            health: simdriver_agent::RecordHealth {
+                received: 10,
+                sampled: 5,
+                skipped_by_pipeline: 0,
+                skipped_by_recorder: 0,
+                max_gap_ms: 17.0,
+                gaps_over_34ms: 0,
+            },
+            error: None,
+            sheets: vec![vec![byte]],
+            sheet_files: Vec::new(),
+        }
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn durations_parse() {
+        assert_eq!(parse_duration("5s").unwrap(), Duration::from_secs(5));
+        assert_eq!(parse_duration("1.5s").unwrap(), Duration::from_millis(1500));
+        assert_eq!(parse_duration("800ms").unwrap(), Duration::from_millis(800));
+        assert_eq!(parse_duration("250").unwrap(), Duration::from_millis(250));
+        for bad in ["5m", "abc", "", "s", "-1s", "1.2.3s"] {
+            assert!(
+                matches!(parse_duration(bad), Err(CliError::Usage(_))),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn record_args_split_at_double_dash() {
+        let all = strings(&["--time", "2s", "--full", "--", "tap", "Log in"]);
+        let (head, tail) = split_double_dash(&all);
+        let args = parse_args(head, &["--time", "--full"]).unwrap();
+        let opts = record_options(&args).unwrap();
+        assert_eq!(opts.time, Duration::from_secs(2));
+        assert!(opts.full);
+        assert_eq!(
+            parse_record_tail(tail).unwrap(),
+            vec![Step::Tap {
+                target: "Log in".into()
+            }]
+        );
+        let none = strings(&["--fps", "25"]);
+        let (head, tail) = split_double_dash(&none);
+        assert_eq!(head.len(), 2);
+        assert!(parse_record_tail(tail).unwrap().is_empty());
+        let steps = strings(&["steps", r#"[{"action":"tap","target":"a"}]"#]);
+        assert_eq!(parse_record_tail(&steps).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn expect_under_record_is_usage() {
+        let tail = strings(&["tap", "Log in", "--expect", "Welcome"]);
+        assert!(matches!(parse_record_tail(&tail), Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn frame_file_names() {
+        assert_eq!(frame_file_name(3, 250), "frame-03-250ms.png");
+        assert_eq!(frame_file_name(12, 4000), "frame-12-4000ms.png");
+    }
+
+    #[test]
+    fn out_dir_is_created_and_reused() {
+        use simdriver_agent::RecordedFrame;
+        let dir = std::env::temp_dir().join(format!(
+            "simdriver-cli-test-{}-{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        let out = dir.join("nested").join("rec");
+        let build = |byte: u8| {
+            test_recording(
+                byte,
+                vec![RecordedFrame {
+                    index: 1,
+                    t_ms: 250,
+                    change: 0.5,
+                    png: vec![byte],
+                    file: None,
+                }],
+            )
+        };
+        let mut first = build(1);
+        write_recording(&out, &mut first).unwrap();
+        std::fs::write(out.join("keep.txt"), "mine").unwrap();
+        let mut second = build(2);
+        write_recording(&out, &mut second).unwrap();
+        assert_eq!(std::fs::read(out.join("sheet-1.png")).unwrap(), [2]);
+        assert_eq!(std::fs::read(out.join("frame-01-250ms.png")).unwrap(), [2]);
+        assert_eq!(
+            std::fs::read_to_string(out.join("keep.txt")).unwrap(),
+            "mine"
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(out.join("record.json")).unwrap())
+                .unwrap();
+        let sheet = json["sheetFiles"][0].as_str().unwrap();
+        assert!(std::path::Path::new(sheet).is_absolute());
+        assert!(sheet.ends_with("sheet-1.png"));
+        assert!(
+            json["frames"][0]["file"]
+                .as_str()
+                .unwrap()
+                .ends_with("frame-01-250ms.png")
+        );
+        assert_eq!(second.sheet_files, [sheet.to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
