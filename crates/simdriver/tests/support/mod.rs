@@ -42,17 +42,19 @@ pub fn booted_udid() -> Option<String> {
     panic!("SIMDRIVER_IT=1 but no simulator is booted");
 }
 
-/// False (with a skip note) while the owner's pip-mini streams `udid`: no scripted input on
-/// a simulator someone is using. Its helpers are `simframe <udid> …` / `simhid <udid>`.
+/// False (with a skip note) while a host of the owner's streams `udid`: no scripted input on
+/// a simulator someone is using. Hosts run `sdframe <udid> …` / `sdhid <udid>` (simdriver:
+/// Vellum, the ported pip-mini) or `simframe` / `simhid` (the old pip-mini prototype).
+/// Call it BEFORE starting the test's own `Driver`, whose helpers would match too.
 pub fn input_allowed(udid: &str) -> bool {
-    let pattern = format!("/(simframe|simhid) {udid}");
+    let pattern = format!("/(simframe|simhid|sdframe|sdhid) {udid}");
     let busy = Command::new("pgrep")
         .args(["-f", &pattern])
         .output()
         .is_ok_and(|o| o.status.success());
     if busy {
         eprintln!(
-            "skipping: pip-mini is live on {udid} (no scripted input); use SIMDRIVER_TEST_UDID"
+            "skipping: a simdriver/pip-mini host is live on {udid} (no scripted input); use SIMDRIVER_TEST_UDID"
         );
     }
     !busy
