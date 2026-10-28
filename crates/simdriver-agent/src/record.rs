@@ -10,8 +10,10 @@
 //! producer: a collector that falls behind costs the pipeline nothing (the tap skips).
 //!
 //! The caller marks [`actions_started`](Recorder::actions_started) /
-//! [`actions_ended`](Recorder::actions_ended) around its steps (no marks: the actions
-//! "ended" at `t = 0`). Every ≤ 10 ms the collector checks for the end, with
+//! [`actions_ended`](Recorder::actions_ended) around its steps; with no actions it calls
+//! `actions_ended` right after `start`. Nothing ends a recording before `actions_ended`,
+//! [`step_failed`](Recorder::step_failed) or `finish`, however still the screen (the
+//! caller may be slow to begin). Then, every ≤ 10 ms, the collector checks for the end, with
 //! `due = t0 + time` and `quiet = max(action end, last frame arrival or t0)`. Actions
 //! still running at `due` keep it going until they end (`extended`); then it ends the
 //! normal way, with the time clock restarted at the action end so a screen that never
@@ -50,6 +52,8 @@ const BASELINE_WAIT: Duration = Duration::from_secs(2);
 /// Longest wait for the last frame, after the end.
 const FINAL_WAIT: Duration = Duration::from_millis(200);
 const MAX_TIME: Duration = Duration::from_secs(30);
+const IDLE: std::ops::RangeInclusive<Duration> =
+    Duration::from_millis(50)..=Duration::from_millis(5000);
 const FPS: std::ops::RangeInclusive<u32> = 25..=30;
 
 /// How long and how densely to record. [`Recorder::start`] applies [`clamped`](Self::clamped).
@@ -80,10 +84,11 @@ impl Default for RecordOptions {
 }
 
 impl RecordOptions {
-    /// Within the limits: time ≤ 30 s, fps 25..=30, max_frames ≥ 2.
+    /// Within the limits: time ≤ 30 s, idle 50 ms..=5 s, fps 25..=30, max_frames ≥ 2.
     pub fn clamped(self) -> RecordOptions {
         RecordOptions {
             time: self.time.min(MAX_TIME),
+            idle: self.idle.clamp(*IDLE.start(), *IDLE.end()),
             fps: self.fps.clamp(*FPS.start(), *FPS.end()),
             max_frames: self.max_frames.max(2),
             ..self
@@ -106,7 +111,8 @@ pub enum Ended {
 }
 
 /// A kept frame. `t_ms` is when it arrived, from the baseline; `change` is the share of
-/// change-print cells that differ from the frame kept before it.
+/// change-print cells that changed from the previous frame the recorder kept at the time;
+/// thinning can remove that frame.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordedFrame {
@@ -180,6 +186,7 @@ struct Kept {
 }
 
 /// What the collector built; behind a lock so `finish` has it even if the thread died.
+#[derive(Default)]
 struct Collected {
     kept: Vec<Kept>,
     end: Option<(Ended, Instant)>,
@@ -218,9 +225,7 @@ impl Recorder {
                     print,
                     change: 0.0,
                 }],
-                end: None,
-                error: None,
-                health: TapHealth::default(),
+                ..Collected::default()
             }),
             stop: AtomicBool::new(false),
         });
@@ -243,12 +248,12 @@ impl Recorder {
         m.start.get_or_insert_with(Instant::now);
     }
 
-    /// The last action returned now.
+    /// The last action returned now (with no actions: call it right after `start`).
+    /// Until this, `step_failed` or `finish`, the recording does not end.
     pub fn actions_ended(&self) {
-        let mut m = lock(&self.shared.marks);
-        let now = Instant::now();
-        m.start.get_or_insert(now);
-        m.end.get_or_insert(now);
+        lock(&self.shared.marks)
+            .end
+            .get_or_insert_with(Instant::now);
     }
 
     /// A step failed now: the actions are over, and the recording ends after one
@@ -265,31 +270,20 @@ impl Recorder {
 
     /// Waits for the end, adds the last frame if it differs, and encodes.
     pub fn finish<D: Device + ?Sized>(mut self, device: &D) -> Recording {
-        // Unfinished actions end here, so the wait below is bounded by the end rules.
-        let started = lock(&self.shared.marks).start.is_some();
-        if started {
-            self.actions_ended();
-        }
+        // Unfinished (or unmarked) actions end here, so the wait below is bounded by the
+        // end rules.
+        self.actions_ended();
         if let Some(t) = self.thread.take() {
             // A panicked collector still left what it kept in `out`.
             let _ = t.join();
         }
         let marks = *lock(&self.shared.marks);
-        let c = std::mem::replace(
-            &mut *lock(&self.shared.out),
-            Collected {
-                kept: Vec::new(),
-                end: None,
-                error: None,
-                health: TapHealth::default(),
-            },
-        );
         let Collected {
             mut kept,
             end,
             mut error,
             health,
-        } = c;
+        } = std::mem::take(&mut *lock(&self.shared.out));
         let (ended, end_at) = end.unwrap_or_else(|| {
             error.get_or_insert_with(|| "the recorder stopped".into());
             (Ended::Error, Instant::now())
@@ -300,7 +294,12 @@ impl Recorder {
             let print = fingerprint_with(&f, CHANGE_PRINT, CHANGE_STEP);
             let change = changed(&last.print, &print) as f32;
             if change > 0.0 {
-                let at = health.last_arrival.unwrap_or(end_at).max(last.at);
+                // After the last kept frame (times stay strictly increasing), by the end.
+                let at = health
+                    .last_arrival
+                    .unwrap_or(end_at)
+                    .max(last.at + Duration::from_millis(1))
+                    .min(end_at);
                 kept.push(Kept {
                     at,
                     frame: f,
@@ -460,8 +459,8 @@ fn thin_victim(ts: &[Instant]) -> Option<usize> {
     (1..ts.len().saturating_sub(1)).min_by_key(|&i| ts[i + 1].saturating_duration_since(ts[i - 1]))
 }
 
-/// The end condition reached at `now`, if any (see the module docs). Nothing ends while
-/// actions run (bar a failed step's tail). Once they end, `full` stops at
+/// The end condition reached at `now`, if any (see the module docs). Nothing ends before
+/// the actions are marked ended (bar a failed step's tail). Once they end, `full` stops at
 /// `max(due, action end)`; otherwise a still `idle` ends it, or the time: `due`, or
 /// `action end + time` when the actions outran `due` (the extension restarts the clock).
 fn end_rule(
@@ -474,11 +473,7 @@ fn end_rule(
     if let Some(fail_end) = m.fail_end {
         return (now >= fail_end).then_some(Ended::StepFailed);
     }
-    let action_end = match (m.start, m.end) {
-        (None, _) => t0,
-        (Some(_), Some(end)) => end,
-        (Some(_), None) => return None,
-    };
+    let action_end = m.end?;
     let due = t0 + opts.time;
     if opts.full {
         return (now >= due.max(action_end)).then_some(Ended::Time);
@@ -567,23 +562,31 @@ mod tests {
         Recorder::start(fake, o).unwrap_or_else(|e| panic!("start: {e}"))
     }
 
+    /// A recording with no actions: marked ended right after `start`.
+    fn start_still(fake: &Fake, o: RecordOptions) -> Recorder {
+        let rec = start(fake, o);
+        rec.actions_ended();
+        rec
+    }
+
     #[test]
     fn static_screen_ends_idle_with_baseline_only() {
         let fake = device();
-        let r = start(&fake, opts(5000, 50)).finish(&fake);
+        let r = start_still(&fake, opts(5000, 50)).finish(&fake);
         assert_eq!(r.ended, Ended::Idle);
         assert_eq!(r.frames.len(), 1);
         assert_eq!((r.frames[0].index, r.frames[0].t_ms), (0, 0));
-        assert!((50..150).contains(&r.duration_ms), "{}", r.duration_ms);
+        assert!((50..400).contains(&r.duration_ms), "{}", r.duration_ms);
         assert_eq!(r.settled_ms, Some(0));
         assert!(!r.extended);
-        assert_eq!((r.action_start_ms, r.action_end_ms), (None, None));
+        assert_eq!(r.action_start_ms, None);
+        assert!(r.action_end_ms.is_some_and(|e| e < 50));
     }
 
     #[test]
     fn change_then_still_ends_idle_and_settles() {
         let fake = device();
-        let rec = start(&fake, opts(5000, 200));
+        let rec = start_still(&fake, opts(5000, 200));
         // 40 ms apart (and from the baseline): every one is due at 30 fps.
         for i in 1..=3 {
             thread::sleep(40 * MS);
@@ -607,7 +610,7 @@ mod tests {
     #[test]
     fn identical_frames_are_not_kept() {
         let fake = device();
-        let rec = start(&fake, opts(5000, 150));
+        let rec = start_still(&fake, opts(5000, 150));
         for i in [0, 0, 1, 1, 1] {
             fake.feed(Instant::now(), distinct(i));
             thread::sleep(40 * MS);
@@ -622,23 +625,20 @@ mod tests {
         let fake = device();
         let o = RecordOptions {
             max_frames: 4,
-            ..opts(200, 100)
+            ..opts(400, 200)
         };
         let r = thread::scope(|s| {
-            let rec = start(&fake, o);
-            s.spawn(|| {
-                for i in 1..=30 {
-                    fake.feed(Instant::now(), distinct(i));
-                    thread::sleep(10 * MS);
-                }
-            });
+            let rec = start_still(&fake, o);
+            let began = Instant::now();
+            let feeder = &fake;
+            s.spawn(move || feed_until(feeder, began, 800 * MS));
             rec.finish(&fake)
         });
         assert_eq!(r.ended, Ended::Time);
         assert_eq!(r.settled_ms, None);
         assert!(r.frames.len() <= 4, "{}", r.frames.len());
         assert_eq!(r.frames[0].t_ms, 0, "the baseline is never thinned");
-        assert!((200..600).contains(&r.duration_ms), "{}", r.duration_ms);
+        assert!((400..1200).contains(&r.duration_ms), "{}", r.duration_ms);
         assert!(r.health.received > r.health.sampled, "sampled at 30 fps");
     }
 
@@ -680,7 +680,7 @@ mod tests {
         let end = r.action_end_ms.unwrap();
         assert!(end >= 300);
         assert!(
-            (end + 50..end + 150).contains(&r.duration_ms),
+            (end + 50..end + 400).contains(&r.duration_ms),
             "{} vs {end}",
             r.duration_ms
         );
@@ -700,44 +700,46 @@ mod tests {
 
     #[test]
     fn extended_recording_waits_for_still() {
-        // Time 250 (not 100): the extension's clock runs from the actions' end (300 ms)
-        // for `time`, and must outlast the frames (to ~450 ms) for the idle end to show.
+        // Actions end at 800 ms, past `time` (600 ms); frames run on to 1000 ms. The idle
+        // end (~1200 ms) comes before the restarted clock (800 + 600 = 1400 ms).
         let fake = device();
         let r = thread::scope(|s| {
-            let rec = start(&fake, opts(250, 50));
+            let rec = start(&fake, opts(600, 200));
             let began = Instant::now();
             rec.actions_started();
             let feeder = &fake;
-            s.spawn(move || feed_until(feeder, began, 450 * MS));
-            thread::sleep(300 * MS);
+            s.spawn(move || feed_until(feeder, began, 1000 * MS));
+            thread::sleep(800 * MS);
             rec.actions_ended();
             rec.finish(&fake)
         });
         assert_eq!(r.ended, Ended::Idle);
         assert!(r.extended);
-        assert!(r.duration_ms >= 450, "{}", r.duration_ms);
+        assert!(r.duration_ms >= 1000, "{}", r.duration_ms);
         assert!(r.settled_ms.is_some());
     }
 
     #[test]
     fn extended_never_still_ends_at_action_end_plus_time() {
         let fake = device();
+        // Actions end at 300 ms, past `time` (200 ms); frames never stop (to 1200 ms):
+        // it ends at the restarted clock, 300 + 200 ms.
         let r = thread::scope(|s| {
-            let rec = start(&fake, opts(100, 50));
+            let rec = start(&fake, opts(200, 200));
             let began = Instant::now();
             rec.actions_started();
             let feeder = &fake;
-            s.spawn(move || feed_until(feeder, began, 900 * MS));
-            thread::sleep(200 * MS);
+            s.spawn(move || feed_until(feeder, began, 1200 * MS));
+            thread::sleep(300 * MS);
             rec.actions_ended();
             rec.finish(&fake)
         });
         assert_eq!(r.ended, Ended::Time);
         assert!(r.extended);
         let end = r.action_end_ms.unwrap();
-        assert!(end >= 200);
+        assert!(end >= 300);
         assert!(
-            (end + 100..end + 300).contains(&r.duration_ms),
+            (end + 200..end + 600).contains(&r.duration_ms),
             "{} vs {end}",
             r.duration_ms
         );
@@ -749,7 +751,7 @@ mod tests {
         let fake = device();
         let o = RecordOptions {
             full: true,
-            ..opts(100, 50)
+            ..opts(100, 400)
         };
         let rec = start(&fake, o);
         rec.actions_started();
@@ -760,12 +762,29 @@ mod tests {
         assert!(r.extended);
         let end = r.action_end_ms.unwrap();
         assert!(end >= 300);
-        // At once: no idle tail (50 ms), no second `time` (100 ms).
+        // At once: no idle tail (400 ms).
         assert!(
-            (end..end + 40).contains(&r.duration_ms),
+            (end..end + 300).contains(&r.duration_ms),
             "{} vs {end}",
             r.duration_ms
         );
+    }
+
+    #[test]
+    fn does_not_end_before_actions_are_marked() {
+        // A still screen with no marks for 3 × idle: the caller is slow to begin.
+        let fake = device();
+        let rec = start(&fake, opts(5000, 50));
+        thread::sleep(150 * MS);
+        rec.actions_started();
+        thread::sleep(20 * MS);
+        rec.actions_ended();
+        let r = rec.finish(&fake);
+        assert_eq!(r.ended, Ended::Idle);
+        let (begin, end) = (r.action_start_ms.unwrap(), r.action_end_ms.unwrap());
+        assert!(begin >= 150 && end >= begin, "{begin} {end}");
+        assert!(r.duration_ms >= end + 50, "{} vs {end}", r.duration_ms);
+        assert!(!r.extended);
     }
 
     #[test]
@@ -775,7 +794,7 @@ mod tests {
             full: true,
             ..opts(200, 50)
         };
-        let r = start(&fake, o).finish(&fake);
+        let r = start_still(&fake, o).finish(&fake);
         assert_eq!(r.ended, Ended::Time);
         assert!(!r.extended);
         assert!((200..600).contains(&r.duration_ms), "{}", r.duration_ms);
@@ -798,7 +817,7 @@ mod tests {
         assert_eq!(r.frames.len(), 2, "the frame after the failure is kept");
         let tail = (failed - started).as_millis() as u64 + 100;
         assert!(
-            (tail..tail * 3).contains(&r.duration_ms),
+            (tail..tail + 400).contains(&r.duration_ms),
             "{} vs {tail}",
             r.duration_ms
         );
@@ -831,7 +850,7 @@ mod tests {
     #[test]
     fn final_capture_is_appended_when_it_differs() {
         let fake = device();
-        let rec = start(&fake, opts(5000, 50));
+        let rec = start_still(&fake, opts(5000, 50));
         // The newest frame changes without arriving through the tap.
         *lock(&fake.frame) = Some(distinct(7));
         let r = rec.finish(&fake);
@@ -839,10 +858,11 @@ mod tests {
         assert_eq!(r.frames.len(), 2);
         assert!(r.frames[1].change > 0.0);
         assert_eq!(r.settled_ms, Some(r.frames[1].t_ms));
+        assert!(r.frames[1].t_ms > r.frames[0].t_ms && r.frames[1].t_ms <= r.duration_ms);
 
         // Unchanged: not appended.
         let fake = device();
-        let r = start(&fake, opts(5000, 50)).finish(&fake);
+        let r = start_still(&fake, opts(5000, 50)).finish(&fake);
         assert_eq!(r.frames.len(), 1);
     }
 
@@ -872,16 +892,24 @@ mod tests {
         );
         let c = RecordOptions {
             time: Duration::from_secs(60),
+            idle: Duration::from_secs(60),
             fps: 60,
             max_frames: 0,
             ..d.clone()
         }
         .clamped();
         assert_eq!(
-            (c.time, c.fps, c.max_frames),
-            (Duration::from_secs(30), 30, 2)
+            (c.time, c.idle, c.fps, c.max_frames),
+            (Duration::from_secs(30), Duration::from_secs(5), 30, 2)
         );
-        assert_eq!(RecordOptions { fps: 10, ..d }.clamped().fps, 25);
+        let c = RecordOptions {
+            fps: 10,
+            idle: Duration::ZERO,
+            ..d.clone()
+        }
+        .clamped();
+        assert_eq!((c.fps, c.idle), (25, 50 * MS));
+        assert_eq!(d.clone().clamped().idle, d.idle, "in range: unchanged");
     }
 
     #[test]
