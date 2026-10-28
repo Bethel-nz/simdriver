@@ -491,6 +491,9 @@ pub struct StepsReport {
     pub screenshots: Vec<ElementScreenshot>,
     /// Alerts returned by alert steps or accepted open prompts.
     pub alerts: Vec<AlertInfo>,
+    /// The recording, when the run began with a `record` step (kept on failure too).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record: Option<Recording>,
     /// The screen after the run (or after the failure), without an image.
     pub snapshot: Option<Snapshot>,
 }
@@ -1789,6 +1792,7 @@ impl<D: Device> Agent<D> {
                 self.device.button(b);
                 Ok(())
             }
+            Step::Record { .. } => Err(AgentError::Invalid("record must be the first step".into())),
             Step::WaitFor { text, timeout_ms } => {
                 let wait = timeout_ms.map_or(WAIT_FOR_DEFAULT, Duration::from_millis);
                 let want = text.to_lowercase();
@@ -1820,32 +1824,48 @@ impl<D: Device> Agent<D> {
         lock(&self.alerts).clear();
         let mut failed = None;
         let mut completed = 0;
-        for (index, step) in steps.iter().enumerate() {
+        let mut recorder = None;
+        let mut first = 0;
+        if let Some(at) = steps
+            .iter()
+            .skip(1)
+            .position(|s| s.record_options().is_some())
+        {
+            let e = AgentError::Invalid("record must be the first step".into());
+            let mut f = Self::failure(at + 1, &steps[at + 1], &e);
+            f.error = "record must be the first step".into();
+            failed = Some(f);
+        } else if let Some(opts) = steps.first().and_then(Step::record_options) {
+            match Recorder::start(&self.device, opts) {
+                Ok(r) => {
+                    if steps.len() > 1 {
+                        r.actions_started();
+                    }
+                    recorder = Some(r);
+                    completed = 1;
+                    first = 1;
+                }
+                Err(e) => failed = Some(Self::failure(0, &steps[0], &e)),
+            }
+        }
+        for (index, step) in steps.iter().enumerate().skip(first) {
+            if failed.is_some() {
+                break;
+            }
             match self.run(step) {
                 Ok(()) => completed += 1,
                 Err(e) => {
-                    let safe_step = match step {
-                        Step::Fill {
-                            target,
-                            secret: true,
-                            ..
-                        } => Step::Fill {
-                            target: target.clone(),
-                            value: "[redacted]".into(),
-                            secret: true,
-                        },
-                        _ => step.clone(),
-                    };
-                    failed = Some(StepFailure {
-                        index,
-                        step: safe_step,
-                        code: e.code().into(),
-                        error: e.to_string(),
-                    });
-                    break;
+                    if let Some(r) = &recorder {
+                        r.step_failed();
+                    }
+                    failed = Some(Self::failure(index, step, &e));
                 }
             }
         }
+        let record = recorder.map(|r| {
+            r.actions_ended();
+            r.finish(&self.device)
+        });
         let mut snapshot = self
             .snapshot(&SnapshotOptions {
                 image: false,
@@ -1881,7 +1901,44 @@ impl<D: Device> Agent<D> {
             clipboard,
             screenshots,
             alerts,
+            record,
             snapshot,
+        }
+    }
+
+    /// Run `steps` as a recording: `opts` becomes a leading `record` step.
+    pub fn record(&self, opts: RecordOptions, steps: &[Step]) -> StepsReport {
+        let ms = |d: Duration| Some(u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let mut all = vec![Step::Record {
+            time_ms: ms(opts.time),
+            idle_ms: ms(opts.idle),
+            full: opts.full,
+            fps: Some(opts.fps),
+            max_frames: Some(opts.max_frames),
+        }];
+        all.extend_from_slice(steps);
+        self.steps(&all)
+    }
+
+    /// A failed step as reported; a secret fill's value is redacted.
+    fn failure(index: usize, step: &Step, e: &AgentError) -> StepFailure {
+        let safe_step = match step {
+            Step::Fill {
+                target,
+                secret: true,
+                ..
+            } => Step::Fill {
+                target: target.clone(),
+                value: "[redacted]".into(),
+                secret: true,
+            },
+            _ => step.clone(),
+        };
+        StepFailure {
+            index,
+            step: safe_step,
+            code: e.code().into(),
+            error: e.to_string(),
         }
     }
 }
@@ -3101,5 +3158,158 @@ mod tests {
         );
         let b = Agent::new(Fake::new(varied));
         assert_eq!(b.tap("Edit", None).unwrap().at, [200.0, 325.0]);
+    }
+
+    fn rec_step() -> Step {
+        Step::Record {
+            time_ms: Some(300),
+            idle_ms: Some(50),
+            full: false,
+            fps: None,
+            max_frames: None,
+        }
+    }
+
+    fn tap_login() -> Step {
+        Step::Tap {
+            target: "Log in".into(),
+        }
+    }
+
+    fn recording_agent() -> Agent<Fake> {
+        let a = Agent::new(Fake::new(login()));
+        *lock(&a.device.frame) = Some(solid(30));
+        a
+    }
+
+    #[test]
+    fn record_step_parses_from_json() {
+        let s: Step =
+            serde_json::from_str(r#"{"action":"record","timeMs":3000,"full":true}"#).unwrap();
+        assert_eq!(
+            s,
+            Step::Record {
+                time_ms: Some(3000),
+                idle_ms: None,
+                full: true,
+                fps: None,
+                max_frames: None,
+            }
+        );
+        let o = s.record_options().unwrap();
+        assert_eq!(
+            (o.time, o.idle, o.full, o.fps, o.max_frames),
+            (
+                Duration::from_secs(3),
+                Duration::from_millis(400),
+                true,
+                30,
+                24
+            )
+        );
+        assert!(tap_login().record_options().is_none());
+        assert!(serde_json::from_str::<Step>(r#"{"action":"record","bogus":1}"#).is_err());
+        assert!(matches!(
+            recording_agent().run(&s),
+            Err(AgentError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn record_not_first_is_refused_and_nothing_runs() {
+        let a = recording_agent();
+        let r = a.steps(&[tap_login(), rec_step()]);
+        assert!(!r.ok);
+        assert_eq!(r.completed, 0);
+        let f = r.failed.unwrap();
+        assert_eq!((f.index, f.code.as_str()), (1, "invalid"));
+        assert_eq!(f.error, "record must be the first step");
+        assert!(lock(&a.device.taps).is_empty());
+        assert!(r.record.is_none());
+        assert!(r.snapshot.is_some());
+    }
+
+    #[test]
+    fn second_record_is_refused() {
+        let a = recording_agent();
+        let r = a.steps(&[rec_step(), tap_login(), rec_step()]);
+        assert!(!r.ok);
+        assert_eq!(r.completed, 0);
+        assert_eq!(r.failed.unwrap().index, 2);
+        assert!(lock(&a.device.taps).is_empty());
+        assert!(r.record.is_none());
+    }
+
+    #[test]
+    fn leading_record_covers_the_run() {
+        let a = recording_agent();
+        let r = a.steps(&[rec_step(), tap_login()]);
+        assert!(r.ok, "{:?}", r.failed);
+        assert_eq!(r.completed, 2);
+        assert_eq!(lock(&a.device.taps).len(), 1);
+        let rec = r.record.expect("a recording");
+        assert!(rec.action_start_ms.is_some() && rec.action_end_ms.is_some());
+        assert!(rec.action_start_ms <= rec.action_end_ms);
+        assert!(!rec.frames.is_empty());
+        // A record with nothing after it is a no-action recording.
+        let r = a.steps(&[rec_step()]);
+        assert!(r.ok);
+        let rec = r.record.expect("a recording");
+        assert_eq!(rec.action_start_ms, None);
+    }
+
+    #[test]
+    fn failed_step_still_returns_the_recording() {
+        let a = recording_agent();
+        let r = a.steps(&[
+            rec_step(),
+            Step::Tap {
+                target: "Nope".into(),
+            },
+        ]);
+        assert!(!r.ok);
+        assert_eq!(r.completed, 1);
+        assert_eq!(r.failed.unwrap().index, 1);
+        assert_eq!(r.record.expect("a recording").ended, Ended::StepFailed);
+    }
+
+    #[test]
+    fn a_recorder_that_cannot_start_fails_at_index_zero() {
+        let a = Agent::new(Fake::new(login()));
+        let r = a.steps(&[rec_step(), tap_login()]);
+        let f = r.failed.unwrap();
+        assert_eq!((f.index, f.code.as_str()), (0, "not-ready"));
+        assert_eq!(r.completed, 0);
+        assert!(lock(&a.device.taps).is_empty());
+        assert!(r.record.is_none());
+    }
+
+    #[test]
+    fn agent_record_refuses_nested_record() {
+        let a = recording_agent();
+        let r = a.record(RecordOptions::default(), &[rec_step(), tap_login()]);
+        let f = r.failed.unwrap();
+        assert_eq!((f.index, f.code.as_str()), (1, "invalid"));
+        assert!(lock(&a.device.taps).is_empty());
+        let r = a.record(
+            RecordOptions {
+                time: Duration::from_millis(300),
+                idle: Duration::from_millis(50),
+                ..RecordOptions::default()
+            },
+            &[tap_login()],
+        );
+        assert!(r.ok, "{:?}", r.failed);
+        assert!(r.record.is_some());
+    }
+
+    #[test]
+    fn report_json_omits_record_when_absent() {
+        let a = recording_agent();
+        let v = serde_json::to_value(a.steps(&[tap_login()])).unwrap();
+        assert!(v.get("record").is_none());
+        let v = serde_json::to_value(a.steps(&[rec_step(), tap_login()])).unwrap();
+        assert!(v["record"]["actionStartMs"].is_u64());
+        assert!(v["record"].get("png").is_none());
     }
 }

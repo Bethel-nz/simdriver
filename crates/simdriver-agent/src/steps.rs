@@ -3,7 +3,9 @@
 //! Each step resolves its target on a fresh, settled screen; the run stops at the first
 //! step that fails and reports it with the screen as it is then, so an agent never acts
 //! on a screen it has not seen.
+use crate::RecordOptions;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -96,6 +98,22 @@ pub enum Step {
         #[serde(default)]
         degrees: f64,
     },
+    /// Record the screen over the steps that follow (valid only as the first step): a
+    /// few timed frames and a contact sheet, in the report's `record`. Unset fields take
+    /// the recorder's defaults and limits.
+    #[serde(rename_all = "camelCase")]
+    Record {
+        #[serde(default)]
+        time_ms: Option<u64>,
+        #[serde(default)]
+        idle_ms: Option<u64>,
+        #[serde(default)]
+        full: bool,
+        #[serde(default)]
+        fps: Option<u32>,
+        #[serde(default)]
+        max_frames: Option<usize>,
+    },
     /// Fast directional swipe with momentum.
     Fling { direction: String },
     /// Swipe between refs, labels, grid cells, or normalized `[x, y]` points.
@@ -144,6 +162,30 @@ pub enum Step {
         #[serde(default)]
         timeout_ms: Option<u64>,
     },
+}
+
+impl Step {
+    /// For `Record`: its options over [`RecordOptions::default`] (the recorder clamps).
+    pub(crate) fn record_options(&self) -> Option<RecordOptions> {
+        let Step::Record {
+            time_ms,
+            idle_ms,
+            full,
+            fps,
+            max_frames,
+        } = self
+        else {
+            return None;
+        };
+        let d = RecordOptions::default();
+        Some(RecordOptions {
+            time: time_ms.map_or(d.time, Duration::from_millis),
+            idle: idle_ms.map_or(d.idle, Duration::from_millis),
+            full: *full,
+            fps: fps.unwrap_or(d.fps),
+            max_frames: max_frames.unwrap_or(d.max_frames),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
