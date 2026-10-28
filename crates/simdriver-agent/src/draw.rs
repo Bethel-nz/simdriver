@@ -86,9 +86,13 @@ impl Canvas {
     }
 
     /// `f` scaled to `w`×`h` by area averaging (each destination pixel is the mean of
-    /// the source pixels it covers), top-left at (x0, y0).
+    /// the source pixels it covers), top-left at (x0, y0). An empty frame, or one with
+    /// fewer bytes than its size says, draws nothing.
     fn blit_scaled(&mut self, f: &Frame, x0: i64, y0: i64, w: usize, h: usize) {
         let (sw, sh) = (f.width as usize, f.height as usize);
+        if sw == 0 || sh == 0 || f.data.len() < sw * sh * 4 {
+            return;
+        }
         for dy in 0..h {
             let (ya, yb) = (
                 dy * sh / h,
@@ -117,15 +121,21 @@ impl Canvas {
         }
     }
 
+    /// The canvas as a PNG; empty when it cannot be encoded (a zero-size or short
+    /// frame), so a caller holding a recording never loses it to a panic here.
     fn png(&self) -> Vec<u8> {
         let mut out = Vec::new();
         let mut enc = png::Encoder::new(&mut out, self.w as u32, self.h as u32);
         enc.set_color(png::ColorType::Rgb);
         enc.set_depth(png::BitDepth::Eight);
         enc.set_compression(png::Compression::Fast);
-        let mut writer = enc.write_header().expect("png header");
-        writer.write_image_data(&self.px).expect("png data");
-        writer.finish().expect("png finish");
+        let ok = enc
+            .write_header()
+            .and_then(|mut w| w.write_image_data(&self.px).and_then(|()| w.finish()))
+            .is_ok();
+        if !ok {
+            out.clear();
+        }
         out
     }
 }
@@ -488,6 +498,34 @@ mod tests {
         // The wide tile is 180 x 82: below it, inside its cell, is background.
         let i = ((GUTTER + 2 * BORDER + 82 + 20) * w as usize + GUTTER + cell + GUTTER + 90) * 3;
         assert_eq!(px[i..i + 3], SHEET_BG);
+    }
+
+    #[test]
+    fn zero_size_frame_does_not_panic() {
+        let (empty, tall) = (frame(0, 0), frame(603, 1311));
+        let short = Frame {
+            data: vec![0; 16], // fewer bytes than its size says
+            ..frame(100, 200)
+        };
+        for f in [&empty, &frame(0, 100), &frame(100, 0), &short] {
+            let sheets = contact_sheet(&[
+                Tile {
+                    frame: f,
+                    label: "#0 +0ms".into(),
+                    phase: TilePhase::Before,
+                },
+                Tile {
+                    frame: &tall,
+                    label: "#1 +40ms".into(),
+                    phase: TilePhase::After,
+                },
+            ]);
+            assert_eq!(sheets.len(), 1);
+            let (w, h, _) = decode(&sheets[0]);
+            assert!(w <= 1568 && h <= 1568, "{w}x{h}");
+            // An unencodable frame gives no PNG rather than a panic.
+            assert!(frame_png(f).is_empty());
+        }
     }
 
     #[test]
