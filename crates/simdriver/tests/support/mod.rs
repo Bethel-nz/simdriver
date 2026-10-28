@@ -61,8 +61,9 @@ pub fn input_allowed(udid: &str) -> bool {
 }
 
 pub fn fixture_path(name: &str) -> PathBuf {
+    // Relative to the simdriver crate, so other crates' tests can share this module.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
+        .join("../simdriver/tests/fixtures")
         .join(name)
 }
 
