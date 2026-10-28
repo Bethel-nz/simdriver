@@ -483,6 +483,10 @@ pub struct StepsReport {
     /// Steps that ran to completion.
     pub completed: usize,
     pub failed: Option<StepFailure>,
+    /// The recording, when the run began with a `record` step (kept on failure too). Early
+    /// in the report so its sheet files are read first; absent (not `null`) without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record: Option<Recording>,
     /// Verification result for each fill step that completed, in order.
     pub verified: Vec<bool>,
     /// Values returned by clipboardRead steps, in order.
@@ -491,9 +495,6 @@ pub struct StepsReport {
     pub screenshots: Vec<ElementScreenshot>,
     /// Alerts returned by alert steps or accepted open prompts.
     pub alerts: Vec<AlertInfo>,
-    /// The recording, when the run began with a `record` step (kept on failure too).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub record: Option<Recording>,
     /// The screen after the run (or after the failure), without an image.
     pub snapshot: Option<Snapshot>,
 }
@@ -3311,5 +3312,15 @@ mod tests {
         let v = serde_json::to_value(a.steps(&[rec_step(), tap_login()])).unwrap();
         assert!(v["record"]["actionStartMs"].is_u64());
         assert!(v["record"].get("png").is_none());
+    }
+
+    #[test]
+    fn record_and_its_sheet_files_come_first() {
+        let a = recording_agent();
+        let text = serde_json::to_string(&a.steps(&[rec_step(), tap_login()])).unwrap();
+        let at = |key: &str| text.find(&format!("\"{key}\"")).unwrap_or(usize::MAX);
+        assert!(at("record") < at("verified"), "{text}");
+        assert!(at("record") < at("snapshot"), "{text}");
+        assert!(text.contains("\"record\":{\"sheetFiles\":"), "{text}");
     }
 }

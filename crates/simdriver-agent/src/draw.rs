@@ -239,6 +239,19 @@ const BORDER: usize = 3;
 /// Label strip under each tile: 7 rows at scale 2, plus padding.
 const LABEL_H: usize = 20;
 const LABEL_SCALE: i64 = 2;
+/// The legend strip across the top of each sheet: a swatch and a word per border colour.
+const LEGEND_H: usize = LABEL_H;
+const LEGEND: [(TilePhase, &str); 3] = [
+    (TilePhase::Before, "BEFORE"),
+    (TilePhase::During, "DURING"),
+    (TilePhase::After, "AFTER"),
+];
+/// Swatch edge, the space after a swatch, and between legend entries.
+const SWATCH: usize = 14;
+const SWATCH_GAP: usize = 6;
+const LEGEND_GAP: usize = 16;
+/// Tiles start below the gutter, the legend and another gutter.
+const TOP: usize = GUTTER + LEGEND_H + GUTTER;
 const SHEET_BG: [u8; 3] = [24, 24, 24];
 const PHASE_BEFORE: [u8; 3] = [140, 140, 140];
 const PHASE_DURING: [u8; 3] = [41, 121, 255];
@@ -252,19 +265,55 @@ fn phase_color(p: TilePhase) -> [u8; 3] {
     }
 }
 
+/// Width of `text` in the 5×7 font at scale `s`.
+fn text_w(text: &str, s: usize) -> usize {
+    (text.len() * 6 * s).saturating_sub(s)
+}
+
+/// Width of the legend strip's contents.
+fn legend_w() -> usize {
+    LEGEND
+        .iter()
+        .map(|(_, word)| SWATCH + SWATCH_GAP + text_w(word, LABEL_SCALE as usize))
+        .sum::<usize>()
+        + LEGEND_GAP * (LEGEND.len() - 1)
+}
+
+/// The legend: grey `BEFORE`, blue `DURING`, green `AFTER`, at the top left of the sheet.
+fn draw_legend(c: &mut Canvas) {
+    let mut x = GUTTER as i64;
+    let y = GUTTER as i64;
+    let sy = y + (LEGEND_H - SWATCH) as i64 / 2;
+    let ty = y + (LEGEND_H as i64 - 7 * LABEL_SCALE) / 2;
+    for (phase, word) in LEGEND {
+        c.fill(
+            x,
+            sy,
+            x + SWATCH as i64,
+            sy + SWATCH as i64,
+            phase_color(phase),
+            256,
+        );
+        x += (SWATCH + SWATCH_GAP) as i64;
+        c.text(x, ty, word, LABEL_SCALE, [255, 255, 255]);
+        x += (text_w(word, LABEL_SCALE as usize) + LEGEND_GAP) as i64;
+    }
+}
+
 /// The frame at full resolution, as a PNG.
 pub fn frame_png(frame: &Frame) -> Vec<u8> {
     Canvas::from_frame(frame).png()
 }
 
-/// Tiles laid out left to right, top to bottom on sheets of at most 1568 px per edge.
-/// Tiles are 180 px wide (height by their own aspect); when they do not all fit, the
-/// overflow goes on another sheet rather than shrinking.
+/// Tiles laid out left to right, top to bottom on sheets of at most 1568 px per edge,
+/// under a legend of the border colours: grey before the actions, blue during, green
+/// after. Tiles are 180 px wide (height by their own aspect); when they do not all fit,
+/// the overflow goes on another sheet rather than shrinking.
 pub fn contact_sheet(tiles: &[Tile]) -> Vec<Vec<u8>> {
     let cell_w = TILE_W + 2 * BORDER;
     let cols = ((SHEET_MAX - GUTTER) / (cell_w + GUTTER)).max(1);
     // Tile image height by aspect, capped so one cell always fits a sheet.
-    let max_img = SHEET_MAX - 2 * GUTTER - 2 * BORDER - LABEL_H;
+    let max_img = SHEET_MAX - TOP - GUTTER - 2 * BORDER - LABEL_H;
     let img_h = |t: &Tile| {
         let f = t.frame;
         (TILE_W * f.height as usize / (f.width as usize).max(1)).clamp(1, max_img)
@@ -274,7 +323,7 @@ pub fn contact_sheet(tiles: &[Tile]) -> Vec<Vec<u8>> {
     let row_h = |r: &[Tile]| r.iter().map(img_h).max().unwrap_or(0) + 2 * BORDER + LABEL_H;
     // Pack rows into sheets.
     let mut sheets: Vec<Vec<&[Tile]>> = Vec::new();
-    let mut used = GUTTER;
+    let mut used = TOP;
     for r in rows {
         let h = row_h(r) + GUTTER;
         match sheets.last_mut() {
@@ -284,7 +333,7 @@ pub fn contact_sheet(tiles: &[Tile]) -> Vec<Vec<u8>> {
             }
             _ => {
                 sheets.push(vec![r]);
-                used = GUTTER + h;
+                used = TOP + h;
             }
         }
     }
@@ -292,14 +341,16 @@ pub fn contact_sheet(tiles: &[Tile]) -> Vec<Vec<u8>> {
         .iter()
         .map(|rows| {
             let n = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-            let w = GUTTER + n * (cell_w + GUTTER);
-            let h = GUTTER + rows.iter().map(|r| row_h(r) + GUTTER).sum::<usize>();
+            // Never narrower than the legend (a one-tile sheet is).
+            let w = (GUTTER + n * (cell_w + GUTTER)).max(GUTTER + legend_w() + GUTTER);
+            let h = TOP + rows.iter().map(|r| row_h(r) + GUTTER).sum::<usize>();
             let mut c = Canvas {
                 w,
                 h,
                 px: SHEET_BG.repeat(w * h),
             };
-            let mut y = GUTTER;
+            draw_legend(&mut c);
+            let mut y = TOP;
             for r in rows {
                 for (i, t) in r.iter().enumerate() {
                     let x = GUTTER + i * (cell_w + GUTTER);
@@ -439,6 +490,7 @@ mod tests {
         for ch in ('0'..='9')
             .chain('A'..='Z')
             .chain(['e', 'm', 's', '#', '+', '-', ' '])
+            .chain(LEGEND.iter().flat_map(|(_, word)| word.chars()))
         {
             assert_ne!(glyph(ch), unknown, "{ch}");
         }
@@ -494,9 +546,9 @@ mod tests {
         let cell = TILE_W + 2 * BORDER;
         assert_eq!(w as usize, GUTTER + 2 * (cell + GUTTER));
         // Row height follows the tall tile (391 px at 180 wide).
-        assert_eq!(h as usize, GUTTER + 391 + 2 * BORDER + LABEL_H + GUTTER);
+        assert_eq!(h as usize, TOP + 391 + 2 * BORDER + LABEL_H + GUTTER);
         // The wide tile is 180 x 82: below it, inside its cell, is background.
-        let i = ((GUTTER + 2 * BORDER + 82 + 20) * w as usize + GUTTER + cell + GUTTER + 90) * 3;
+        let i = ((TOP + 2 * BORDER + 82 + 20) * w as usize + GUTTER + cell + GUTTER + 90) * 3;
         assert_eq!(px[i..i + 3], SHEET_BG);
     }
 
@@ -540,11 +592,42 @@ mod tests {
         let (w, _, px) = decode(&sheets[0]);
         let at = |tile: usize| {
             let i =
-                ((GUTTER + 1) * w as usize + GUTTER + tile * (TILE_W + 2 * BORDER + GUTTER) + 1)
-                    * 3;
+                ((TOP + 1) * w as usize + GUTTER + tile * (TILE_W + 2 * BORDER + GUTTER) + 1) * 3;
             [px[i], px[i + 1], px[i + 2]]
         };
         assert_eq!(at(0), PHASE_BEFORE);
         assert_eq!(at(1), PHASE_DURING);
+    }
+
+    #[test]
+    fn legend_names_the_border_colours() {
+        let f = frame(100, 200);
+        let one = [Tile {
+            frame: &f,
+            label: "#0 +0ms".into(),
+            phase: TilePhase::Before,
+        }];
+        let (w, h, px) = decode(&contact_sheet(&one)[0]);
+        // A one-tile sheet is widened to hold the whole legend.
+        assert_eq!(w as usize, GUTTER + legend_w() + GUTTER);
+        assert!(legend_w() > TILE_W + 2 * BORDER);
+        assert!(h as usize <= SHEET_MAX);
+        let at = |x: usize, y: usize| {
+            let i = (y * w as usize + x) * 3;
+            [px[i], px[i + 1], px[i + 2]]
+        };
+        // Each swatch's centre, left to right, in its phase colour.
+        let mid = GUTTER + LEGEND_H / 2;
+        let mut x = GUTTER;
+        for (phase, word) in LEGEND {
+            assert_eq!(at(x + SWATCH / 2, mid), phase_color(phase), "{word}");
+            x += SWATCH + SWATCH_GAP + text_w(word, LABEL_SCALE as usize) + LEGEND_GAP;
+        }
+        // Its words are drawn in white.
+        let word_x = GUTTER + SWATCH + SWATCH_GAP;
+        let white = (GUTTER..GUTTER + LEGEND_H)
+            .flat_map(|y| (word_x..word_x + 60).map(move |x| (x, y)))
+            .any(|(x, y)| at(x, y) == [255, 255, 255]);
+        assert!(white);
     }
 }

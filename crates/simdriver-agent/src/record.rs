@@ -55,6 +55,8 @@ const MAX_TIME: Duration = Duration::from_secs(30);
 const IDLE: std::ops::RangeInclusive<Duration> =
     Duration::from_millis(50)..=Duration::from_millis(5000);
 const FPS: std::ops::RangeInclusive<u32> = 25..=30;
+/// Kept frames: the baseline and the newest at least; at most 32 (≈ 100 MB raw at scale 2).
+const MAX_FRAMES: std::ops::RangeInclusive<usize> = 2..=32;
 
 /// How long and how densely to record. [`Recorder::start`] applies [`clamped`](Self::clamped).
 #[derive(Debug, Clone)]
@@ -67,7 +69,7 @@ pub struct RecordOptions {
     pub full: bool,
     /// Frames judged a second, 25..=30.
     pub fps: u32,
-    /// Most frames kept (at least 2: the baseline and the newest).
+    /// Most frames kept, 2..=32 (at least the baseline and the newest).
     pub max_frames: usize,
 }
 
@@ -84,13 +86,15 @@ impl Default for RecordOptions {
 }
 
 impl RecordOptions {
-    /// Within the limits: time ≤ 30 s, idle 50 ms..=5 s, fps 25..=30, max_frames ≥ 2.
+    /// Within the limits: time ≤ 30 s, idle 50 ms..=5 s, fps 25..=30, max_frames 2..=32.
     pub fn clamped(self) -> RecordOptions {
         RecordOptions {
             time: self.time.min(MAX_TIME),
             idle: self.idle.clamp(*IDLE.start(), *IDLE.end()),
             fps: self.fps.clamp(*FPS.start(), *FPS.end()),
-            max_frames: self.max_frames.max(2),
+            max_frames: self
+                .max_frames
+                .clamp(*MAX_FRAMES.start(), *MAX_FRAMES.end()),
             ..self
         }
     }
@@ -100,7 +104,9 @@ impl RecordOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Ended {
-    /// The actions ended and the screen stayed still for `idle`.
+    /// The actions ended and the screen stayed still for `idle`. A stalled stream (the
+    /// frame helper restarting mid-recording) delivers no frames, so it reads the same as a
+    /// still screen and can end `Idle` too.
     Idle,
     /// The time ran out (after any extension).
     Time,
@@ -140,10 +146,14 @@ pub struct RecordHealth {
 }
 
 /// A finished recording. Times are ms from the baseline (`t = 0`), from host receive
-/// instants (a few ms of transport, consistent with each other).
+/// instants (a few ms of transport, consistent with each other). The recorder sees the
+/// screen only through arriving frames: a stream that stalls (the frame helper restarting)
+/// looks like a still screen, so `ended` and `settled_ms` cannot tell the two apart.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Recording {
+    /// Where the contact sheets were written, if they were (first: read the sheet first).
+    pub sheet_files: Vec<String>,
     pub ended: Ended,
     /// Actions ran past `time`, and the recording with them.
     pub extended: bool,
@@ -159,7 +169,6 @@ pub struct Recording {
     /// Contact sheets (PNG), usually one.
     #[serde(skip)]
     pub sheets: Vec<Vec<u8>>,
-    pub sheet_files: Vec<String>,
 }
 
 /// A recording in progress. See the module docs.
@@ -329,7 +338,7 @@ impl Recorder {
             .is_none_or(|a| end_at.saturating_duration_since(a) >= self.opts.idle);
         let settled_ms = match ended {
             Ended::Idle => Some(last_t),
-            Ended::Time if still_at_end => Some(last_t),
+            Ended::Time | Ended::StepFailed if still_at_end => Some(last_t),
             _ => None,
         };
         let frames = kept
@@ -821,11 +830,27 @@ mod tests {
             "{} vs {tail}",
             r.duration_ms
         );
-        assert_eq!(r.settled_ms, None);
+        assert_eq!(r.settled_ms, None, "a frame arrived within idle of the end");
         assert!(
             r.action_end_ms.is_some(),
             "the failing step ended the actions"
         );
+    }
+
+    #[test]
+    fn step_failed_on_a_still_screen_settles() {
+        // Same rule as the other endings: nothing arrived in the last `idle`, so it settled
+        // at the last kept frame (`step_failed_keeps_a_tail` covers the unsettled case).
+        let fake = device();
+        let rec = start(&fake, opts(5000, 60));
+        rec.actions_started();
+        fake.feed(Instant::now(), distinct(1));
+        thread::sleep(100 * MS);
+        rec.step_failed();
+        let r = rec.finish(&fake);
+        assert_eq!(r.ended, Ended::StepFailed);
+        assert_eq!(r.frames.len(), 2);
+        assert_eq!(r.settled_ms, Some(r.frames[1].t_ms));
     }
 
     #[test]
@@ -902,6 +927,18 @@ mod tests {
             (c.time, c.idle, c.fps, c.max_frames),
             (Duration::from_secs(30), Duration::from_secs(5), 30, 2)
         );
+        let c = RecordOptions {
+            max_frames: 1000,
+            ..d.clone()
+        }
+        .clamped();
+        assert_eq!(c.max_frames, 32, "1000 frames would be ~2.8 GB raw");
+        let c = RecordOptions {
+            max_frames: 32,
+            ..d.clone()
+        }
+        .clamped();
+        assert_eq!(c.max_frames, 32);
         let c = RecordOptions {
             fps: 10,
             idle: Duration::ZERO,
