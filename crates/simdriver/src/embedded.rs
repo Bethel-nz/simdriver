@@ -1,6 +1,7 @@
 //! The helper binaries, compiled into this crate and unpacked on first use. The build's own
 //! output directory can't be relied on: `cargo install` deletes it after installing.
 use std::collections::hash_map::DefaultHasher;
+use std::ffi::OsString;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
@@ -23,21 +24,25 @@ const HELPERS: [(&str, &[u8]); 3] = [
     ),
 ];
 
-/// Where this build's helpers are unpacked: the user's cache, else the temp dir. If neither
-/// can be written the path is still returned, so starting a helper reports it as missing.
-pub(crate) fn dir() -> &'static Path {
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
+/// Where this build's helpers are unpacked, or why they couldn't be. Only ever the user's own
+/// cache: helpers run from a shared directory (like `/tmp`) could be swapped by another user.
+pub(crate) fn dir() -> &'static Result<PathBuf, String> {
+    static DIR: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     DIR.get_or_init(|| {
-        let cache = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")));
-        let temp = std::env::temp_dir();
-        cache
-            .iter()
-            .chain([&temp])
-            .find_map(|base| unpack(&base.join("simdriver/helpers")).ok())
-            .unwrap_or_else(|| temp.join("simdriver/helpers").join(build_id()))
+        let root = cache_root(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
+            .ok_or("no cache directory (HOME is not set)")?
+            .join("simdriver/helpers");
+        unpack(&root).map_err(|e| format!("could not unpack into {}: {e}", root.display()))
     })
+}
+
+/// `$XDG_CACHE_HOME`, else `$HOME/.cache`. A relative path is ignored: it would resolve
+/// against the working directory, which may not be the user's.
+fn cache_root(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let xdg = xdg.map(PathBuf::from);
+    let home = home.map(|home| PathBuf::from(home).join(".cache"));
+    xdg.filter(|p| p.is_absolute())
+        .or(home.filter(|p| p.is_absolute()))
 }
 
 /// One directory per build, so processes from different versions never share helpers.
@@ -112,6 +117,19 @@ mod tests {
         let (_, bytes) = HELPERS[1];
         assert_eq!(fs::read(dir.join("sdhid")).unwrap(), bytes);
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn cache_root_precedence() {
+        let root = |xdg: Option<&str>, home: Option<&str>| {
+            cache_root(xdg.map(Into::into), home.map(Into::into))
+        };
+        assert_eq!(root(Some("/x"), Some("/h")), Some("/x".into()));
+        assert_eq!(root(None, Some("/h")), Some("/h/.cache".into()));
+        assert_eq!(root(None, None), None);
+        assert_eq!(root(Some(""), Some("/h")), Some("/h/.cache".into()));
+        assert_eq!(root(Some("rel"), Some("/h")), Some("/h/.cache".into()));
+        assert_eq!(root(None, Some("rel")), None);
     }
 
     #[test]

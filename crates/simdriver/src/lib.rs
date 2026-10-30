@@ -1,9 +1,13 @@
 use std::path::Path;
 
 /// Directory containing the helper binaries (`sdframe`, `sdhid`, `sdax`) built by `build.rs`
-/// and compiled into this crate. They are unpacked there on the first call.
+/// and compiled into this crate. They are unpacked there on the first call; if that fails
+/// this is a path that doesn't exist, and starting a driver reports why.
 pub fn baked_helper_dir() -> &'static Path {
-    embedded::dir()
+    match embedded::dir() {
+        Ok(dir) => dir,
+        Err(_) => Path::new("/nonexistent/simdriver-helpers"),
+    }
 }
 
 mod ax;

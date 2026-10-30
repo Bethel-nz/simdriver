@@ -748,6 +748,14 @@ impl Driver {
             return Err(Error::NotBooted(device.udid));
         }
         let dir = helper_dir(opts.helper_dir.as_deref());
+        if let Err(why) = crate::embedded::dir()
+            && dir == crate::baked_helper_dir()
+        {
+            return Err(Error::Spawn(format!(
+                "{why}; set {} to a directory with the helpers",
+                crate::helper::HELPER_DIR_ENV
+            )));
+        }
         let frame_args = vec![
             device.udid.clone(),
             "--fps".into(),
