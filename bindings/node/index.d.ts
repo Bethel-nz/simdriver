@@ -99,6 +99,8 @@ export declare class Driver {
   clearAppData(bundleId: string): Promise<void>
   text(s: string): void
   button(name: string, presses?: number | undefined | null, holdSecs?: number | undefined | null): void
+  /** A Grid over this screen (`cols` columns, default 6), or null before input connects. */
+  grid(cols?: number): Grid | null
   stats(): JsStats
   /**
    * Stop the driver. Idempotent; after it returns, no further events reach JS and the
