@@ -129,7 +129,7 @@ pub enum HidCmd {
 }
 
 impl HidCmd {
-    /// One JSON line (no trailing newline) in simhid's stdin format.
+    /// One JSON line (no trailing newline) in sdhid's stdin format.
     pub fn to_line(&self) -> String {
         match self {
             HidCmd::Touch { phase, x, y, edge } => format!(

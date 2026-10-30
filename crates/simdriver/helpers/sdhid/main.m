@@ -1,5 +1,6 @@
 /**
- * simhid — native touch/keyboard/button injector for pip-mini.
+ * sdhid — native touch/keyboard/button injector for simdriver (derived from
+ * pip-mini's simhid).
  *
  * Talks to the simulator's own `dtuhidd` digitizer service directly, the way
  * Meta's FBSimulatorControl DTUHID transport does (MIT; HID/DTUHIDModels.swift,
@@ -26,15 +27,15 @@
  * Points are normalized to 0…1 of the portrait screen.
  *
  * dtuhidd serves one client per service: a second connection invalidates the
- * first (the "dtuhidd connection … invalidated" error). simhid therefore owns
+ * first (the "dtuhidd connection … invalidated" error). sdhid therefore owns
  * ALL HID — touches, buttons, keys, text — but does not fight for the service:
  * when displaced it prints {"t":"displaced"} once, drops every command except a
  * gesture start (touch/touch2 down, button, key, text), and on the next gesture
  * start reconnects, prints {"t":"reclaimed"} and sends that command. A reclaim gets
- * a short liveness budget (3 × 1 s, 250 ms apart); if it fails, simhid prints
+ * a short liveness budget (3 × 1 s, 250 ms apart); if it fails, sdhid prints
  * {"t":"error"} and stays displaced, so the next gesture start tries again.
  *
- * When the device leaves Booted (shutdown, reboot) simhid exits 5: its
+ * When the device leaves Booted (shutdown, reboot) sdhid exits 5: its
  * connection would otherwise be dead for good (dtuhidd only reports it
  * "interrupted"), and the owner restarts it once the device is back.
  *
@@ -54,7 +55,7 @@
  * 3 CoreSimulator / device not found / not booted · 4 no main screen size ·
  * 5 the device left Booted while running.
  *
- * Usage: simhid <udid>
+ * Usage: sdhid <udid>
  */
 
 #import <Foundation/Foundation.h>
@@ -510,13 +511,13 @@ static void readStdin(void) {
 int main(int argc, char *argv[]) {
   @autoreleasepool {
     if (argc < 2) {
-      fprintf(stderr, "usage: simhid <udid>\n");
+      fprintf(stderr, "usage: sdhid <udid>\n");
       return 2;
     }
     signal(SIGPIPE, SIG_IGN);
-    g_xpcQueue = dispatch_queue_create("pipmini.simhid.xpc", DISPATCH_QUEUE_SERIAL);
+    g_xpcQueue = dispatch_queue_create("simdriver.sdhid.xpc", DISPATCH_QUEUE_SERIAL);
     g_inputQueue = dispatch_queue_create(
-        "pipmini.simhid.input",
+        "simdriver.sdhid.input",
         dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
 
     g_device = findDevice([NSString stringWithUTF8String:argv[1]]);

@@ -472,12 +472,12 @@ static BOOL ensureSegment(NSUInteger outWidth, NSUInteger outHeight) {
 @end
 
 typedef enum {
-  SIMFRAME_ALL,
-  SIMFRAME_NEW_ONLY,
-  SIMFRAME_LEGACY_ONLY,
-} simframeRegisterMode;
+  SDFRAME_ALL,
+  SDFRAME_NEW_ONLY,
+  SDFRAME_LEGACY_ONLY,
+} sdframeRegisterMode;
 
-static simframeRegisterMode g_registerMode = SIMFRAME_ALL;
+static sdframeRegisterMode g_registerMode = SDFRAME_ALL;
 static NSUUID *g_legacyToken = nil; // set in registerCallbacks (legacy families' token)
 static double g_rereregInterval = 0.0; // --rerereg seconds; 0 = register once
 static double g_lastRegisterAt = 0.0;  // CFAbsoluteTime of last registration
@@ -568,7 +568,7 @@ static void registerCallbacks(id screen) {
   BOOL registeredAny = NO;
   g_legacyToken = [NSUUID UUID];
 
-  if (g_registerMode != SIMFRAME_LEGACY_ONLY && [screen conformsToProtocol:@protocol(SimScreen)]) {
+  if (g_registerMode != SDFRAME_LEGACY_ONLY && [screen conformsToProtocol:@protocol(SimScreen)]) {
     guardedProxyCall(@"SimScreen register", ^{
       [(NSObject<SimScreen> *)screen registerScreenCallbacksWithUUID:g_pumper.token
                                                       callbackQueue:queue
@@ -582,7 +582,7 @@ static void registerCallbacks(id screen) {
   // Legacy damageRectangles + surface-change. On this CoreSimulator the render
   // server delivers damage callbacks per presented frame (a whole-frame
   // compositor invokes it with an empty rect array — see Meta's comment).
-  if (g_registerMode != SIMFRAME_NEW_ONLY) {
+  if (g_registerMode != SDFRAME_NEW_ONLY) {
     SEL damage = NSSelectorFromString(@"registerCallbackWithUUID:damageRectanglesCallback:");
     if ([screen respondsToSelector:damage]) {
       guardedProxyCall(@"damageRectangles register", ^{
@@ -623,19 +623,19 @@ static void registerCallbacks(id screen) {
     exit(4);
   }
   emitNote([NSString stringWithFormat:@"callbacks registered (mode %s token-new %@ screen uid %@)",
-            g_registerMode == SIMFRAME_NEW_ONLY ? "new" : g_registerMode == SIMFRAME_LEGACY_ONLY ? "legacy" : "all",
+            g_registerMode == SDFRAME_NEW_ONLY ? "new" : g_registerMode == SDFRAME_LEGACY_ONLY ? "legacy" : "all",
             g_pumper.token.UUIDString, identity ?: @"(none)"]);
 }
 
 static void unregisterCallbacks(void) {
   if (g_pumper == nil || g_pumper.descriptor == nil) return;
   id screen = g_pumper.descriptor;
-  if (g_registerMode != SIMFRAME_LEGACY_ONLY && [screen conformsToProtocol:@protocol(SimScreen)]) {
+  if (g_registerMode != SDFRAME_LEGACY_ONLY && [screen conformsToProtocol:@protocol(SimScreen)]) {
     guardedProxyCall(@"SimScreen unregister", ^{
       [(NSObject<SimScreen> *)screen unregisterScreenCallbacksWithUUID:g_pumper.token];
     });
   }
-  if (g_registerMode == SIMFRAME_NEW_ONLY) {
+  if (g_registerMode == SDFRAME_NEW_ONLY) {
     return;
   }
   // Legacy families were registered under legacyToken — unregister the same.
@@ -872,9 +872,9 @@ int main(int argc, char * argv[]) {
         NSInteger s = value.integerValue;
         g_scale = s > 1 ? (NSUInteger)s : 1;
       } else if ([flag isEqualToString:@"--mode"]) {
-        if ([value isEqualToString:@"new"]) g_registerMode = SIMFRAME_NEW_ONLY;
-        else if ([value isEqualToString:@"legacy"]) g_registerMode = SIMFRAME_LEGACY_ONLY;
-        else g_registerMode = SIMFRAME_ALL;
+        if ([value isEqualToString:@"new"]) g_registerMode = SDFRAME_NEW_ONLY;
+        else if ([value isEqualToString:@"legacy"]) g_registerMode = SDFRAME_LEGACY_ONLY;
+        else g_registerMode = SDFRAME_ALL;
       } else if ([flag isEqualToString:@"--rerereg"]) {
         g_rereregInterval = value.doubleValue;
       }
