@@ -11,10 +11,6 @@ fn main() {
     std::fs::create_dir_all(&out).unwrap();
 
     println!("cargo:rerun-if-changed=helpers");
-    println!(
-        "cargo:rustc-env=SIMDRIVER_BAKED_HELPER_DIR={}",
-        out.display()
-    );
 
     // (name, extra frameworks)
     let helper_specs: [(&str, &[&str]); 3] = [

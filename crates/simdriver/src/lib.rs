@@ -1,13 +1,15 @@
 use std::path::Path;
 
-/// Directory containing the helper binaries (`sdframe`, `sdhid`, `sdax`) built by `build.rs`.
+/// Directory containing the helper binaries (`sdframe`, `sdhid`, `sdax`) built by `build.rs`
+/// and compiled into this crate. They are unpacked there on the first call.
 pub fn baked_helper_dir() -> &'static Path {
-    Path::new(env!("SIMDRIVER_BAKED_HELPER_DIR"))
+    embedded::dir()
 }
 
 mod ax;
 mod devices;
 mod driver;
+mod embedded;
 mod error;
 // Public only so cbindgen can scan it (include/simdriver.h); not part of the Rust API.
 #[doc(hidden)]

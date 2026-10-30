@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 /// Env var that overrides where the helper binaries live.
 pub const HELPER_DIR_ENV: &str = "SIMDRIVER_HELPER_DIR";
 
-/// Helper directory: `opt`, else `$SIMDRIVER_HELPER_DIR`, else the dir baked in by `build.rs`.
+/// Helper directory: `opt`, else `$SIMDRIVER_HELPER_DIR`, else where the embedded helpers unpack.
 pub fn helper_dir(opt: Option<&Path>) -> PathBuf {
     resolve_helper_dir(opt, std::env::var_os(HELPER_DIR_ENV))
 }
